@@ -36,6 +36,7 @@ pub struct ShadowQuicInbound {
     tls: QuicTlsConfig,
     auth_hash: Option<[u8; 64]>,
 
+    congestion_controller: Option<String>,
     idle_timeout: Duration,
     next_context_id: Arc<AtomicU16>,
     udp_recv_map: UdpRecvMap,
@@ -67,6 +68,7 @@ impl ShadowQuicInbound {
         Ok(Self {
             tag,
             auth_hash,
+            congestion_controller: cfg.congestion_controller.clone(),
             tls,
             address: cfg.address.clone().context("require address")?,
             port: cfg.port.context("require port")?,
@@ -178,7 +180,7 @@ impl AnyInbound for ShadowQuicInbound {
             self.idle_timeout,
             self.tls.cert.as_deref(),
             self.tls.key.as_deref(),
-            None,
+            self.congestion_controller.clone(),
             self.tls.sni.clone(),
             self.tls.alpns.clone(),
             self.tls.zero_rtt,

@@ -39,6 +39,7 @@ pub struct ShadowQuicOutbound {
     dns_server_name: Option<String>,
     bind_interface: Option<String>,
 
+    congestion_controller: Option<String>,
     connect_timeout: Duration,
     idle_timeout: Duration,
 
@@ -104,6 +105,7 @@ impl ShadowQuicOutbound {
             connection: Mutex::new(None),
             dns_server_name: cfg.dns.clone(),
             bind_interface: cfg.bind_interface.clone(),
+            congestion_controller: cfg.congestion_controller.clone(),
             next_context_id: AtomicU16::new(1),
             datagram_sender_tx,
             datagram_sender_rx,
@@ -158,7 +160,7 @@ impl ShadowQuicOutbound {
                 self.tls.cert.as_deref(),
                 self.tls.sni.clone(),
                 self.tls.alpns.clone(),
-                None,
+                self.congestion_controller.clone(),
                 self.tls.jls_username.clone(),
                 self.tls.jls_password.clone(),
                 self.tls.enable_jls,
