@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tracing::debug;
 
 use tracing::{info, warn};
@@ -45,6 +45,7 @@ pub struct ShadowQuicOutbound {
 
     udp_mod: UdpMode,
 
+    udp_recv_map_notify: Arc<Notify>,
     client: Mutex<Option<Arc<QuinnClient>>>,
     connection: Mutex<Option<Arc<quinn::Connection>>>,
     next_context_id: AtomicU16,
@@ -101,6 +102,7 @@ impl ShadowQuicOutbound {
             idle_timeout,
             auth_hash,
             udp_mod,
+            udp_recv_map_notify: Arc::new(Notify::new()),
             client: Mutex::new(None),
             connection: Mutex::new(None),
             dns_server_name: cfg.dns.clone(),
@@ -216,11 +218,13 @@ impl ShadowQuicOutbound {
             UdpMode::OverStream => start_unistream_listener(
                 conn_clone,
                 self.udp_recv_map.clone(),
+                self.udp_recv_map_notify.clone(),
                 self.connect_timeout(),
             ),
             UdpMode::OverDatagram => start_datagram_loop(
                 conn_clone,
                 self.udp_recv_map.clone(),
+                self.udp_recv_map_notify.clone(),
                 self.datagram_sender_rx.clone(),
             ),
         }
@@ -373,7 +377,13 @@ impl AnyOutbound for ShadowQuicOutbound {
         bistream.flush().await?;
 
         let receiver = Arc::new(ShadowUdpReceiver::new(self.udp_recv_map.clone()));
-        run_bistream_recv_listener(bistream, self.udp_recv_map.clone(), receiver.clone(), None);
+        run_bistream_recv_listener(
+            bistream,
+            self.udp_recv_map.clone(),
+            receiver.clone(),
+            self.udp_recv_map_notify.clone(),
+            None,
+        );
 
         // setup sender
         let out_packet: Arc<dyn AnyPacket>;

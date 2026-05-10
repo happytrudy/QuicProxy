@@ -508,7 +508,7 @@ impl Router {
                 res = out_packet_clone.recv_from() => {
                     match res {
                         Ok((_source, _target, packet)) => {
-                            trace!("send {}, from {} to {}", packet.len(), target_addr, source_addr);
+                            debug!("send {}, from {} to {}", packet.len(), target_addr, source_addr);
                             if let Err(e) = in_packet.send_to(packet, &source_addr, &target_addr).await {
                                 info!("UDP session quit because [inbound err: {:#}]",e);
                                 break;
@@ -523,7 +523,7 @@ impl Router {
                 res = in_packet.recv_from() => {
                     match res {
                         Ok((_source, _target, packet)) => {
-                            trace!("send {}, from {} to {}", packet.len(), source_addr, target_addr);
+                            debug!("send {}, from {} to {}", packet.len(), source_addr, target_addr);
                             if let Err(e) = out_packet.send_to(packet, &target_addr, &source_addr).await {
                                 info!("UDP session quit because [outbound err: {:#}]",e);
                                 break;

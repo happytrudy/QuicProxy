@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 
 use crate::config::InboundConfig;
 use crate::proxy::inbound::AnyInbound;
@@ -41,6 +42,7 @@ pub struct ShadowQuicInbound {
     idle_timeout: Duration,
     next_context_id: Arc<AtomicU16>,
     udp_recv_map: UdpRecvMap,
+    udp_recv_map_notify: Arc<Notify>,
     datagram_sender_tx: flume::Sender<Bytes>,
     datagram_sender_rx: flume::Receiver<Bytes>,
 }
@@ -75,6 +77,7 @@ impl ShadowQuicInbound {
             port: cfg.port.context("require port")?,
             idle_timeout,
             next_context_id: Arc::new(AtomicU16::new(1)),
+            udp_recv_map_notify: Arc::new(Notify::new()),
             udp_recv_map,
             datagram_sender_tx,
             datagram_sender_rx,
@@ -92,6 +95,7 @@ impl ShadowQuicInbound {
         conn: Arc<quinn::Connection>,
         send_context_id: u16,
         idle_timeout: Duration,
+        udp_recv_map_notify: Arc<Notify>,
     ) -> anyhow::Result<()> {
         let recv_context_id = read_context_id(&mut bistream, idle_timeout).await?;
         debug!("receive context_id {}", recv_context_id);
@@ -112,6 +116,7 @@ impl ShadowQuicInbound {
             bistream,
             udp_recv_map,
             receiver.clone(),
+            udp_recv_map_notify,
             Some(recv_context_id),
         );
 
@@ -194,6 +199,7 @@ impl AnyInbound for ShadowQuicInbound {
 
         let auth_hash = self.auth_hash;
         let udp_recv_map = self.udp_recv_map.clone();
+        let udp_recv_map_notify = self.udp_recv_map_notify.clone();
         let datagram_sender_tx = self.datagram_sender_tx.clone();
         let datagram_sender_rx = self.datagram_sender_rx.clone();
         let session_timeout = self.idle_timeout();
@@ -211,6 +217,7 @@ impl AnyInbound for ShadowQuicInbound {
 
                     let conn_clone = conn.clone();
                     let udp_recv_map_clone = udp_recv_map.clone();
+                    let udp_recv_map_notify_clone = udp_recv_map_notify.clone();
                     let datagram_sender_tx = datagram_sender_tx.clone();
                     let datagram_sender_rx = datagram_sender_rx.clone();
                     let session_timeout_val = session_timeout;
@@ -225,11 +232,13 @@ impl AnyInbound for ShadowQuicInbound {
                                 start_unistream_listener(
                                     conn_clone.clone(),
                                     udp_recv_map_clone.clone(),
+                                    udp_recv_map_notify_clone.clone(),
                                     session_timeout_val,
                                 );
                                 start_datagram_loop(
                                     conn_clone.clone(),
                                     udp_recv_map_clone.clone(),
+                                    udp_recv_map_notify_clone.clone(),
                                     datagram_sender_rx.clone(),
                                 );
                             };
@@ -266,6 +275,7 @@ impl AnyInbound for ShadowQuicInbound {
                                 let tag = tag_clone.clone();
                                 let router = router_clone.clone();
                                 let udp_recv_map_clone = udp_recv_map_clone.clone();
+                                let udp_recv_map_notify_clone = udp_recv_map_notify_clone.clone();
                                 let datagram_sender_tx = datagram_sender_tx.clone();
                                 let send_context_id = next_context_id.clone();
                                 let remote_addr = conn_clone2.remote_address().to_string();
@@ -318,6 +328,7 @@ impl AnyInbound for ShadowQuicInbound {
                                                     conn_clone2.clone(),
                                                     context_id,
                                                     session_timeout_val,
+                                                    udp_recv_map_notify_clone,
                                                 )
                                                 .instrument(span)
                                                 .await?;

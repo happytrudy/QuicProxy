@@ -30,7 +30,7 @@
     "default_server": "direct",
     "servers": {
       "direct": {
-        "type": "direct"
+        "type": "direct",
       }
     }
   },

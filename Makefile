@@ -1,5 +1,6 @@
 test_http3:
-	/opt/homebrew/opt/curl/bin/curl --http3-only https://cloudflare.com
+	IP=$$(dig +short cloudflare.com | head -1); \
+	/opt/homebrew/opt/curl/bin/curl --http3-only --connect-timeout 13 --resolve cloudflare.com:443:$$IP https://cloudflare.com
 
 run_test_config: build
 	./target/release/quicproxy --elevate -c ./tests/test_http3.json5
