@@ -33,9 +33,9 @@ pub fn init_dns(cfg: &Config) -> Result<()> {
         let name_str = name.clone();
 
         let out: Arc<dyn AnyDNS> = match protocol.as_str() {
-            "fakeip" => Arc::new(FakeIPDNS::new(name_str, item)),
-            "udp" => Arc::new(UdpDns::new(name_str, item)),
-            "https" => Arc::new(HttpsDns::new(name_str, item)),
+            "fakeip" => FakeIPDNS::new(name_str, item)?,
+            "udp" => UdpDns::new(name_str, item)?,
+            "https" => HttpsDns::new(name_str, item)?,
             _ => {
                 bail!("Unknown dns type: {}", protocol)
             }
@@ -488,33 +488,33 @@ pub struct UdpDns {
 }
 
 impl UdpDns {
-    pub fn new(tag: String, cfg: &DnsServerConfig) -> Self {
-        let address = cfg.address.clone().unwrap_or_else(|| {
-            error!("dns '{}' requires address", tag);
-            std::process::exit(1);
-        });
+    pub fn new(tag: String, cfg: &DnsServerConfig) -> Result<Arc<dyn AnyDNS>> {
+        let address = cfg
+            .address
+            .clone()
+            .ok_or_else(|| anyhow!("dns '{}' requires address", tag))?;
         let port = cfg.port.unwrap_or(53);
 
         let min_ttl = cfg.min_ttl.map(Duration::from_secs);
         let max_ttl = cfg.max_ttl.map(Duration::from_secs);
 
-        let cache = cfg.cache.as_ref().and_then(|c| {
-            CacheWithExpire::new_with_tag(c, tag.clone())
-                .map_err(|e| {
-                    error!("dns '{}' failed to init cache: {:?}", tag, e);
-                    std::process::exit(1);
-                })
-                .ok()
-        });
+        let cache = match cfg.cache.as_ref() {
+            Some(c) => Some(
+                CacheWithExpire::new_with_tag(c, tag.clone())
+                    .map_err(|e| anyhow!("dns '{}' failed to init cache: {:?}", tag, e))?,
+            ),
+            None => None,
+        };
 
-        let outbound = get_outbound_by_tag(cfg.outbound.as_deref().unwrap_or_else(|| {
-            error!("dns '{}' requires outbound", tag);
-            std::process::exit(1);
-        }));
+        let outbound_tag = cfg
+            .outbound
+            .as_deref()
+            .ok_or_else(|| anyhow!("dns '{}' requires outbound", tag))?;
+        let outbound = get_outbound_by_tag(outbound_tag);
 
         let reject_ipv6 = cfg.reject_ipv6;
 
-        Self {
+        Ok(Arc::new(Self {
             tag,
             address,
             port,
@@ -523,7 +523,7 @@ impl UdpDns {
             outbound,
             cache,
             reject_ipv6,
-        }
+        }))
     }
 }
 
@@ -580,34 +580,34 @@ pub struct HttpsDns {
 }
 
 impl HttpsDns {
-    pub fn new(tag: String, cfg: &DnsServerConfig) -> Self {
-        let address = cfg.address.clone().unwrap_or_else(|| {
-            error!("dns '{}' requires address", tag);
-            std::process::exit(1);
-        });
+    pub fn new(tag: String, cfg: &DnsServerConfig) -> Result<Arc<dyn AnyDNS>> {
+        let address = cfg
+            .address
+            .clone()
+            .ok_or_else(|| anyhow!("dns '{}' requires address", tag))?;
         let port = cfg.port.unwrap_or(443);
         let url = format!("https://{}:{}/dns-query", address, port);
 
         let min_ttl = cfg.min_ttl.map(Duration::from_secs);
         let max_ttl = cfg.max_ttl.map(Duration::from_secs);
 
-        let cache = cfg.cache.as_ref().and_then(|c| {
-            CacheWithExpire::new_with_tag(c, tag.clone())
-                .map_err(|e| {
-                    error!("dns '{}' failed to init cache: {:?}", tag, e);
-                    std::process::exit(1);
-                })
-                .ok()
-        });
+        let cache = match cfg.cache.as_ref() {
+            Some(c) => Some(
+                CacheWithExpire::new_with_tag(c, tag.clone())
+                    .map_err(|e| anyhow!("dns '{}' failed to init cache: {:?}", tag, e))?,
+            ),
+            None => None,
+        };
 
-        let outbound = get_outbound_by_tag(cfg.outbound.as_deref().unwrap_or_else(|| {
-            error!("dns '{}' requires outbound", tag);
-            std::process::exit(1);
-        }));
+        let outbound_tag = cfg
+            .outbound
+            .as_deref()
+            .ok_or_else(|| anyhow!("dns '{}' requires outbound", tag))?;
+        let outbound = get_outbound_by_tag(outbound_tag);
 
         let reject_ipv6 = cfg.reject_ipv6;
 
-        Self {
+        Ok(Arc::new(Self {
             tag,
             min_ttl,
             max_ttl,
@@ -615,7 +615,7 @@ impl HttpsDns {
             cache,
             url,
             reject_ipv6,
-        }
+        }))
     }
 }
 
@@ -682,7 +682,7 @@ impl FakeIPDNS {
     const IPV4_CURSOR_CACHE_KEY: &'static str = "fakeip_ipv4_cursor_index";
     const IPV6_CURSOR_CACHE_KEY: &'static str = "fakeip_ipv6_cursor_index";
 
-    pub fn new(tag: String, cfg: &DnsServerConfig) -> Self {
+    pub fn new(tag: String, cfg: &DnsServerConfig) -> Result<Arc<dyn AnyDNS>> {
         let min_ttl = cfg.min_ttl.map(Duration::from_secs);
 
         let default_v4 = Ipv4Net::from_str("198.18.0.0/16").unwrap();
@@ -706,18 +706,23 @@ impl FakeIPDNS {
         let ipv6_cidr = v6_found.unwrap_or(default_v6);
         let ipv4_cidr = v4_found.unwrap_or(default_v4);
 
+        let cache_name = cfg
+            .cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("dns '{}' requires cache", tag))?;
+
         let cache = Cache::new_with_tag(
-            cfg.cache.clone().expect("require cache").as_str(),
+            cache_name.as_str(),
             format!("fakeip:{}", tag),
         )
-        .expect("failed to init cache");
+        .map_err(|e| anyhow!("dns '{}' failed to init cache: {:?}", tag, e))?;
 
         let ipv4_cursor = Self::load_cursor(&cache, Self::IPV4_CURSOR_CACHE_KEY);
         let ipv6_cursor = Self::load_cursor(&cache, Self::IPV6_CURSOR_CACHE_KEY);
 
         let reject_ipv6 = cfg.reject_ipv6;
 
-        Self {
+        Ok(Arc::new(Self {
             tag,
             min_ttl,
             ipv4_cidr,
@@ -726,7 +731,7 @@ impl FakeIPDNS {
             ipv4_cursor: AtomicU64::new(ipv4_cursor),
             ipv6_cursor: AtomicU64::new(ipv6_cursor),
             reject_ipv6,
-        }
+        }))
     }
 
     fn load_cursor(cache: &FakeIPCache, key: &str) -> u64 {

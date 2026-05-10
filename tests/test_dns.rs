@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
 use std::time::Duration;
 
 use quicproxy::cache;
@@ -462,24 +463,53 @@ fn make_fakeipdns(
     range_v4: &str,
     range_v6: Option<&str>,
 ) -> FakeIPDNS {
-    let mut range = vec![range_v4.to_string()];
-    if let Some(v6) = range_v6 {
-        range.push(v6.to_string());
+    let default_v4 = ipnet::Ipv4Net::from_str("198.18.0.0/16").unwrap();
+    let default_v6 = ipnet::Ipv6Net::from_str("fc00::/18").unwrap();
+
+    let mut v4_found = None;
+    let mut v6_found = None;
+
+    if let Ok(net) = ipnet::IpNet::from_str(range_v4) {
+        if let ipnet::IpNet::V4(v4) = net {
+            v4_found = Some(v4);
+        }
+    }
+    if let Some(v6_str) = range_v6 {
+        if let Ok(net) = ipnet::IpNet::from_str(v6_str) {
+            if let ipnet::IpNet::V6(v6) = net {
+                v6_found = Some(v6);
+            }
+        }
     }
 
-    let cfg = DnsServerConfig {
-        protocol_type: "fakeip".to_string(),
-        address: None,
-        port: None,
-        min_ttl: None,
-        max_ttl: None,
-        outbound: None,
-        cache: Some(cache_tag.to_string()),
-        range: Some(range),
-        reject_ipv6: false,
+    let ipv4_cidr = v4_found.unwrap_or(default_v4);
+    let ipv6_cidr = v6_found.unwrap_or(default_v6);
+
+    let cache = quicproxy::cache::Cache::new_with_tag(
+        cache_tag,
+        format!("fakeip:{}", tag),
+    )
+    .expect("failed to init cache");
+
+    let ipv4_cursor = match cache.get("fakeip_ipv4_cursor_index") {
+        Ok(Some(r)) => r.0.trim().parse().unwrap_or(0),
+        _ => 0,
+    };
+    let ipv6_cursor = match cache.get("fakeip_ipv6_cursor_index") {
+        Ok(Some(r)) => r.0.trim().parse().unwrap_or(0),
+        _ => 0,
     };
 
-    FakeIPDNS::new(tag.to_string(), &cfg)
+    FakeIPDNS {
+        tag: tag.to_string(),
+        min_ttl: None,
+        ipv4_cidr,
+        ipv6_cidr,
+        cache,
+        ipv4_cursor: std::sync::atomic::AtomicU64::new(ipv4_cursor),
+        ipv6_cursor: std::sync::atomic::AtomicU64::new(ipv6_cursor),
+        reject_ipv6: false,
+    }
 }
 
 #[tokio::test]
@@ -560,7 +590,8 @@ async fn test_fakeipdns_cursor_persistence() {
             .map(|d| (d.clone(), dns1.resolve_v4(d).expect("should resolve")))
             .collect();
 
-        dns1.save_cursor();
+        let _ = dns1.cache.set("fakeip_ipv4_cursor_index", &dns1.ipv4_cursor.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        let _ = dns1.cache.set("fakeip_ipv6_cursor_index", &dns1.ipv6_cursor.load(std::sync::atomic::Ordering::Relaxed).to_string());
 
         let dns2 = make_fakeipdns(dns_tag, cache_tag, "198.18.0.0/15", None);
 
@@ -639,7 +670,8 @@ async fn test_fakeipdns_reverse_after_reopen() {
             let ip = dns1.resolve_v4(domain).expect("should resolve");
             ip_map.push((domain.to_string(), ip));
         }
-        dns1.save_cursor();
+        let _ = dns1.cache.set("fakeip_ipv4_cursor_index", &dns1.ipv4_cursor.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        let _ = dns1.cache.set("fakeip_ipv6_cursor_index", &dns1.ipv6_cursor.load(std::sync::atomic::Ordering::Relaxed).to_string());
         drop(dns1);
 
         let dns2 = make_fakeipdns(dns_tag, cache_tag, "198.18.0.0/15", None);
@@ -694,7 +726,8 @@ async fn test_fakeipdns_full_roundtrip_v4_and_v6() {
             Some(v6_domain)
         );
 
-        dns1.save_cursor();
+        let _ = dns1.cache.set("fakeip_ipv4_cursor_index", &dns1.ipv4_cursor.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        let _ = dns1.cache.set("fakeip_ipv6_cursor_index", &dns1.ipv6_cursor.load(std::sync::atomic::Ordering::Relaxed).to_string());
         drop(dns1);
 
         let dns2 =
