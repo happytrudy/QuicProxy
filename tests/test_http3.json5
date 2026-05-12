@@ -220,13 +220,8 @@
     }
   },
   "observe": {
-    "enabled": true,
+    "enabled": false,
     "log_interval": 15
-  },
-  "api": {
-    "address": "127.0.0.1",
-    "password": "",
-    "port": 1235
   },
   "log": {
     "level": "debug",

@@ -275,6 +275,8 @@ pub struct InboundConfig {
     pub udp_mod: Option<String>,
     pub congestion_controller: Option<String>,
 
+    #[serde(default = "default_false")]
+    pub gso: bool,
     pub mtu: Option<u16>,
     pub auto_route: Option<bool>,
     pub tun_name: Option<String>,
@@ -316,6 +318,8 @@ pub struct OutboundConfig {
     pub congestion_controller: Option<String>,
 
     pub pool_size: Option<u16>,
+    #[serde(default = "default_false")]
+    pub gso: bool,
     pub outbounds: Option<Vec<String>>,
     pub default_outbound: Option<String>,
     pub url: Option<String>,

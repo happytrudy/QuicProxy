@@ -28,6 +28,7 @@ pub struct SelectorOutbound {
     #[allow(dead_code)]
     default_outbound: String,
     outbounds: Vec<Arc<dyn AnyOutbound>>,
+    outbounds_count: usize,
     outbound_tags: Vec<String>,
     selected_index: AtomicUsize,
     observer: Option<Arc<Observer>>,
@@ -60,6 +61,11 @@ impl SelectorOutbound {
                 get_outbound_by_tag(tag_item.as_ref())
             })
             .collect();
+
+        let outbounds_count = outbounds_vec.len();
+        if outbounds_count == 0 {
+            bail!("has no outbound");
+        }
 
         // Determine selector type based on protocol
         let selector_type = match cfg.protocol_type.as_str() {
@@ -101,6 +107,7 @@ impl SelectorOutbound {
         let outbound = Arc::new(Self {
             tag,
             selector_type,
+            outbounds_count,
             default_outbound,
             outbounds: outbounds_vec,
             outbound_tags: outbound_tags.clone(),
@@ -375,18 +382,20 @@ impl AnyOutbound for SelectorOutbound {
     async fn connect_stream(&self, target: &TargetAddr) -> anyhow::Result<AnyStream> {
         match self.selector_type {
             SelectorType::Manual => {
-                let idx = self.selected_index.load(Ordering::Relaxed) % self.outbounds.len();
-                self.outbounds[idx].connect_stream(target).await
+                let idx = self.selected_index.load(Ordering::Relaxed) % self.outbounds_count;
+                let out = &self.outbounds[idx];
+                info!(
+                    "Selector [{}] using [{}] to connect_stream",
+                    self.tag(),
+                    out.tag()
+                );
+                out.connect_stream(target).await
             }
             SelectorType::UrlTest => {
                 let start_idx = self.selected_index.load(Ordering::Relaxed);
-                let count = self.outbounds.len();
-                if count == 0 {
-                    bail!("urltest [{}] has no outbounds", self.tag);
-                }
 
-                for i in 0..count {
-                    let idx = (start_idx + i) % count;
+                for i in 0..self.outbounds_count {
+                    let idx = (start_idx + i) % self.outbounds_count;
                     let handler = &self.outbounds[idx];
 
                     match handler.connect_stream(target).await {
@@ -399,6 +408,12 @@ impl AnyOutbound for SelectorOutbound {
                                     handler.tag()
                                 );
                                 self.update_selected_index(idx);
+                            } else {
+                                info!(
+                                    "Urltest [{}] using [{}] to connect_stream",
+                                    self.tag(),
+                                    handler.tag()
+                                );
                             }
                             return Ok(stream);
                         }
@@ -421,25 +436,21 @@ impl AnyOutbound for SelectorOutbound {
     async fn connect_packet(&self, target: &TargetAddr) -> anyhow::Result<Arc<dyn AnyPacket>> {
         match self.selector_type {
             SelectorType::Manual => {
-                let idx = self.selected_index.load(Ordering::Relaxed) % self.outbounds.len();
+                let idx = self.selected_index.load(Ordering::Relaxed) % self.outbounds_count;
                 self.outbounds[idx].connect_packet(target).await
             }
             SelectorType::UrlTest => {
                 let start_idx = self.selected_index.load(Ordering::Relaxed);
-                let count = self.outbounds.len();
-                if count == 0 {
-                    bail!("urltest [{}] has no outbounds for UDP", self.tag);
-                }
 
-                for i in 0..count {
-                    let idx = (start_idx + i) % count;
+                for i in 0..self.outbounds_count {
+                    let idx = (start_idx + i) % self.outbounds_count;
                     let handler = &self.outbounds[idx];
 
                     match handler.connect_packet(target).await {
                         Ok(socket) => {
                             if idx != start_idx {
                                 info!(
-                                    "urltest [{}] UDP fallback from [{}] to [{}]",
+                                    "Urltest [{}] UDP fallback from [{}] to [{}]",
                                     self.tag,
                                     self.outbounds[start_idx].tag(),
                                     handler.tag()
@@ -450,7 +461,7 @@ impl AnyOutbound for SelectorOutbound {
                         }
                         Err(e) => {
                             debug!(
-                                "urltest [{}] handler [{}] UDP failed: {}, trying next...",
+                                "Urltest [{}] handler [{}] UDP failed: {}, trying next...",
                                 self.tag,
                                 handler.tag(),
                                 e

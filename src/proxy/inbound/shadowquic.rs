@@ -37,6 +37,7 @@ pub struct ShadowQuicInbound {
     port: u16,
     tls: QuicTlsConfig,
     auth_hash: Option<[u8; 64]>,
+    enable_gso: bool,
 
     congestion_controller: Option<String>,
     idle_timeout: Duration,
@@ -81,6 +82,7 @@ impl ShadowQuicInbound {
             udp_recv_map,
             datagram_sender_tx,
             datagram_sender_rx,
+            enable_gso: cfg.gso,
         })
     }
 
@@ -193,6 +195,7 @@ impl AnyInbound for ShadowQuicInbound {
             self.tls.jls_username.clone(),
             self.tls.jls_password.clone(),
             self.tls.enable_jls,
+            self.enable_gso,
         )
         .await
         .map_err(|e| new_io_other_error(format!("QUIC server error: {}", e)))?;

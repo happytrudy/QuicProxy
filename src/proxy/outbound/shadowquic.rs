@@ -42,6 +42,7 @@ pub struct ShadowQuicOutbound {
     congestion_controller: Option<String>,
     connect_timeout: Duration,
     idle_timeout: Duration,
+    enable_gso: bool,
 
     udp_mod: UdpMode,
 
@@ -111,6 +112,7 @@ impl ShadowQuicOutbound {
             next_context_id: AtomicU16::new(1),
             datagram_sender_tx,
             datagram_sender_rx,
+            enable_gso: cfg.gso,
             udp_recv_map,
         }))
     }
@@ -166,6 +168,7 @@ impl ShadowQuicOutbound {
                 self.tls.jls_username.clone(),
                 self.tls.jls_password.clone(),
                 self.tls.enable_jls,
+                self.enable_gso,
             )
             .with_context(|| {
                 format!(

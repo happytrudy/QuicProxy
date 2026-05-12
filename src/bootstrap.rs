@@ -36,6 +36,8 @@ where
         }
     };
 
+    info!("Init ok. Running...");
+
     tokio::select! {
         res = signal => {
             if let Err(e) = res {

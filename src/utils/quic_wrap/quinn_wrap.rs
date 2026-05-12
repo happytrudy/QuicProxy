@@ -208,6 +208,7 @@ impl QuinnServer {
         jls_username: String,
         jls_passwrod: String,
         is_jls: bool,
+        enable_gso:bool,
     ) -> anyhow::Result<Self> {
         let server_name = sni.as_deref().unwrap_or("apple.com");
         let mut server_config = if is_jls {
@@ -272,6 +273,7 @@ impl QuinnServer {
         transport_config.datagram_send_buffer_size(QUIC_DATAGRAM_BUFFER_SIZE);
         transport_config.max_concurrent_bidi_streams(500u32.into());
         transport_config.max_concurrent_uni_streams(500u32.into());
+        transport_config.enable_segmentation_offload(enable_gso);
 
         // Set congestion controller
         let cc_name = congestion_controller.as_deref().unwrap_or("bbr");
@@ -376,6 +378,7 @@ impl QuinnClient {
         username: String,
         passwrod: String,
         is_jls: bool,
+        enable_gso: bool,
     ) -> anyhow::Result<Self> {
         let server_name = sni.as_deref().unwrap_or("apple.com");
         let mut client_crypto = if is_jls {
@@ -434,6 +437,7 @@ impl QuinnClient {
         }
         transport_config.datagram_receive_buffer_size(Some(QUIC_DATAGRAM_BUFFER_SIZE));
         transport_config.datagram_send_buffer_size(QUIC_DATAGRAM_BUFFER_SIZE);
+        transport_config.enable_segmentation_offload(enable_gso);
 
         // Set congestion controller
         let cc_name = congestion_controller.as_deref().unwrap_or("bbr");
