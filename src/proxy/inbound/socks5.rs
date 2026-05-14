@@ -17,7 +17,7 @@ use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{self, Duration};
-use tracing::field;
+use tracing::{debug, field};
 use tracing::{Instrument, error, info, info_span};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -126,14 +126,6 @@ impl AnyInbound for Socks5Inbound {
                         }
                     }
                     Ok(Some(Socks5Handler::Packet(udp_socket, client_addr, tcp_socket))) => {
-                        let span = info_span!(
-                            "udp",
-                            i = tag_clone,
-                            s = peer_addr.to_string(),
-                            d = field::Empty,
-                            r = field::Empty,
-                            o = field::Empty
-                        );
                         info!(
                             "SOCKS5 UDP ASSOCIATE from {}. Routing packets...",
                             peer_addr
@@ -147,7 +139,6 @@ impl AnyInbound for Socks5Inbound {
                             idle_timeout,
                             tag_clone,
                         )
-                        .instrument(span)
                         .await;
                     }
                     Ok(None) => {}
@@ -277,10 +268,12 @@ pub async fn start_udp_worker(
         let mut drain_buf = [0u8; 1];
         loop {
             match tcp_socket.read(&mut drain_buf).await {
-                Ok(0) | Err(_) => break,
+                Err(_) => break,
+                Ok(0) => continue,
                 Ok(_) => continue,
             }
         }
+        debug!("tcp control stream reset");
         reset_clone.notify_waiters();
     });
 

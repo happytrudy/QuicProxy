@@ -208,7 +208,7 @@ impl QuinnServer {
         jls_username: String,
         jls_passwrod: String,
         is_jls: bool,
-        enable_gso:bool,
+        enable_gso: bool,
     ) -> anyhow::Result<Self> {
         let server_name = sni.as_deref().unwrap_or("apple.com");
         let mut server_config = if is_jls {

@@ -6,7 +6,7 @@ pub mod shadowquic_udp;
 
 use crate::config::{InboundConfig, OutboundConfig};
 use crate::utils::new_io_other_error;
-use anyhow::{Ok, Result, bail};
+use anyhow::{Context, Ok, Result, bail};
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -63,7 +63,7 @@ impl TargetAddr {
 
     /// Read a TargetAddr from an async stream according to SOCKS5 / Trojan address format
     pub async fn read_from<S: AsyncRead + Unpin>(stream: &mut S) -> anyhow::Result<Self> {
-        let atyp = stream.read_u8().await?;
+        let atyp = stream.read_u8().await.context("faild to read_u8")?;
         match atyp {
             1 => {
                 let mut ip_bytes = [0u8; 4];

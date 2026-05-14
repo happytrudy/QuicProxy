@@ -5,6 +5,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU16;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -30,6 +31,31 @@ use super::SourceAddr;
 pub type UdpRecvMap = Arc<DashMap<u16, Arc<ShadowUdpReceiver>>>;
 pub type WaitingDatagramBuffer = Arc<DashMap<u16, Arc<ShadowUdpDatagramBuffer>>>;
 
+pub struct PerConnectionState {
+    pub next_context_id: AtomicU16,
+    pub udp_recv_map: UdpRecvMap,
+    pub udp_recv_map_notify: Arc<KeyedNotify>,
+    pub waiting_datagram_buffer: WaitingDatagramBuffer,
+    pub datagram_sender_tx: tokio::sync::mpsc::Sender<Bytes>,
+}
+
+impl PerConnectionState {
+    pub fn new(capacity: usize) -> (Self, tokio::sync::mpsc::Receiver<Bytes>) {
+        let udp_recv_map: UdpRecvMap = Arc::new(DashMap::new());
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+        (
+            Self {
+                next_context_id: AtomicU16::new(1),
+                udp_recv_map,
+                udp_recv_map_notify: Arc::new(KeyedNotify::new()),
+                waiting_datagram_buffer: Arc::new(DashMap::new()),
+                datagram_sender_tx: tx,
+            },
+            rx,
+        )
+    }
+}
+
 pub struct ShadowUdpDatagramBuffer {
     recveiver_sender: Sender<Bytes>,
     recveiver: Mutex<Receiver<Bytes>>,
@@ -37,7 +63,7 @@ pub struct ShadowUdpDatagramBuffer {
 
 impl ShadowUdpDatagramBuffer {
     pub fn new() -> Self {
-        let (sender, recver) = mpsc::channel(10);
+        let (sender, recver) = mpsc::channel(100);
 
         Self {
             recveiver_sender: sender,
@@ -184,7 +210,7 @@ pub fn run_bistream_recv_listener(
                     res = read_addr_and_context_id(&mut bistream) => {
                         match res {
                             Ok((id, _target)) => {
-                                debug!("received context_id from bistream: {}", id);
+                                debug!("received context_id {} from bistream.", id);
                                 if !context_ids.contains(&id) {
                                     udp_recv_map_clone.insert(id, receiver_for_spawn.clone());
                                     context_ids.push(id);
@@ -192,7 +218,7 @@ pub fn run_bistream_recv_listener(
                                 }
                             }
                             Err(e) => {
-                                error!("bistream read error: {:?}", e);
+                                error!("bistream read error: {}", e);
                                 break;
                             }
                         }
@@ -337,7 +363,7 @@ pub fn start_datagram_loop(
     udp_recv_map: UdpRecvMap,
     waiting_datagram_buffer: WaitingDatagramBuffer,
     udp_recv_map_notify: Arc<KeyedNotify>,
-    datagram_sender_rx: flume::Receiver<Bytes>,
+    mut datagram_sender_rx: tokio::sync::mpsc::Receiver<Bytes>,
 ) {
     tokio::spawn(async move {
         let remote_src = TargetAddr::Ip(conn.remote_address());
@@ -362,15 +388,15 @@ pub fn start_datagram_loop(
                         }
                     }
                 }
-                payload = datagram_sender_rx.recv_async() => {
+                payload = datagram_sender_rx.recv() => {
                     match payload {
-                        Ok(datagram) => {
+                        Some(datagram) => {
                             if let Err(e) = conn.send_datagram(datagram) {
                                 warn!("send_datagram_wait failed: {}", e);
                             }
                         }
-                        Err(e) => {
-                            error!("datagram_sender_rx.recv_async error: {}", e);
+                        None => {
+                            error!("datagram_sender_rx closed");
                             break;
                         }
                     }
@@ -410,7 +436,10 @@ async fn handle_datagram(
         })
         .clone();
 
-    let _ = item.recveiver_sender.send(Bytes::from(payload)).await;
+    if let Err(e) = item.recveiver_sender.send(Bytes::from(payload)).await {
+        waiting_datagram_buffer.remove(&recv_context_id);
+        bail!("datagram sender {} closed: {}", recv_context_id, e);
+    }
     if !is_new {
         return Ok(());
     }
@@ -450,6 +479,7 @@ async fn handle_datagram(
         }
         .await;
 
+        debug!("datagram {} handler loop closed", recv_context_id);
         waiting_datagram_buffer.remove(&recv_context_id);
 
         // 处理错误
@@ -463,7 +493,7 @@ async fn handle_datagram(
 
 pub struct ShadowQuicUdpPacket {
     send_unistream: Option<Arc<Mutex<quinn::SendStream>>>,
-    datagram_sender_tx: Option<flume::Sender<Bytes>>,
+    datagram_sender_tx: Option<tokio::sync::mpsc::Sender<Bytes>>,
 
     send_context_id: u16,
     target: TargetAddr,
@@ -474,7 +504,7 @@ pub struct ShadowQuicUdpPacket {
 impl ShadowQuicUdpPacket {
     pub fn new(
         send_unistream: Option<Arc<Mutex<quinn::SendStream>>>,
-        datagram_sender_tx: Option<flume::Sender<Bytes>>,
+        datagram_sender_tx: Option<tokio::sync::mpsc::Sender<Bytes>>,
         send_context_id: u16,
         target: TargetAddr,
 
@@ -516,7 +546,7 @@ impl AnyPacket for ShadowQuicUdpPacket {
             let mut packet = Vec::with_capacity(2 + buf.len());
             packet.extend_from_slice(&self.send_context_id.to_be_bytes());
             packet.extend_from_slice(&buf);
-            if sender.send_async(Bytes::from(packet)).await.is_err() {
+            if sender.send(Bytes::from(packet)).await.is_err() {
                 warn!("datagram send queue closed");
             }
         }

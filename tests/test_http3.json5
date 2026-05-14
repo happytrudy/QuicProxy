@@ -1,18 +1,27 @@
 {
   "inbounds": {
+    "mix_inbound": {
+      "type": "mix",
+      "address": "127.0.0.1",
+      "idle_timeout": 500,
+      "set_system_proxy": false,
+      "port": 1101
+    },
     "tun_inbound": {
       "type": "tun",
       "tun_address": [
         "172.19.0.1/24",
         // "fdfe:dcba:9876::1/126",
       ],
-      "udp_timeout": 50,
+      "idle_timeout": 100,
+      "mtu": 1428,
       "auto_route": true
     },
     "sq_inbound": {
       "type": "shadowquic",
       "address": "127.0.0.1",
       "set_system_proxy": false,
+      "idle_timeout": 500,
       "port": 2344,
       "tls": {
         "enable_jls": true,

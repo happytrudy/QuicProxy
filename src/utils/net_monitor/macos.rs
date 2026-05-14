@@ -36,7 +36,6 @@ pub(crate) fn start_monitor(tx: broadcast::Sender<()>) -> Option<tokio::task::Jo
             nw_path_monitor_set_queue(monitor, queue);
 
             let block = RcBlock::new(move |_path: *mut AnyObject| {
-                tracing::debug!("NWPathMonitor: Path changed");
                 let _ = tx.send(());
             });
 

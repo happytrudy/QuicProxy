@@ -136,14 +136,6 @@ impl AnyInbound for MixInbound {
                                     .context("Routing stream error")?;
                             }
                             Some(Socks5Handler::Packet(udp_socket, client_addr, tcp_socket)) => {
-                                let span = info_span!(
-                                    "udp",
-                                    i = tag_clone,
-                                    s = peer_addr.to_string(),
-                                    d = field::Empty,
-                                    r = field::Empty,
-                                    o = field::Empty
-                                );
                                 info!(
                                     "Mix (SOCKS5) UDP ASSOCIATE from {}. Routing packets...",
                                     peer_addr
@@ -157,7 +149,6 @@ impl AnyInbound for MixInbound {
                                     timeout_duration,
                                     tag_clone.clone(),
                                 )
-                                .instrument(span)
                                 .await;
                             }
                             None => {}

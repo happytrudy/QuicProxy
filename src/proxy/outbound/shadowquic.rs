@@ -1,5 +1,5 @@
 use crate::proxy::shadowquic_udp::{
-    ShadowUdpReceiver, UdpRecvMap, WaitingDatagramBuffer, gen_sunny_auth_hash,
+    PerConnectionState, ShadowQuicUdpPacket, ShadowUdpReceiver, gen_sunny_auth_hash,
     run_bistream_recv_listener, start_datagram_loop, start_udp_session_cleaner,
     start_unistream_listener,
 };
@@ -7,11 +7,8 @@ use crate::utils::quic_wrap::quinn_wrap::QuinnBistream;
 use crate::utils::quic_wrap::quinn_wrap::QuinnClient;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use bytes::Bytes;
-use dashmap::DashMap;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -22,10 +19,8 @@ use tracing::{info, warn};
 
 use crate::config::OutboundConfig;
 use crate::proxy::outbound::{AnyOutbound, AnyStream, UdpMode};
-use crate::proxy::shadowquic_udp::ShadowQuicUdpPacket;
 use crate::proxy::{QuicTlsConfig, TargetAddr};
 
-use crate::utils::keyed_notify::KeyedNotify;
 use crate::utils::{format_duration, new_io_other_error};
 
 use super::AnyPacket;
@@ -48,15 +43,7 @@ pub struct ShadowQuicOutbound {
 
     udp_mod: UdpMode,
 
-    waiting_datagram_buffer: WaitingDatagramBuffer,
-    udp_recv_map_notify: Arc<KeyedNotify>,
-    client: Mutex<Option<Arc<QuinnClient>>>,
-    connection: Mutex<Option<Arc<quinn::Connection>>>,
-    next_context_id: AtomicU16,
-
-    datagram_sender_tx: flume::Sender<Bytes>,
-    datagram_sender_rx: flume::Receiver<Bytes>,
-    udp_recv_map: UdpRecvMap,
+    cached: Mutex<Option<(Arc<quinn::Connection>, Arc<QuinnClient>, Arc<PerConnectionState>)>>,
 }
 
 impl ShadowQuicOutbound {
@@ -70,10 +57,6 @@ impl ShadowQuicOutbound {
         if cfg.udp_mod.clone().unwrap_or("stream".to_string()) == "datagram" {
             udp_mod = UdpMode::OverDatagram;
         }
-
-        let (datagram_sender_tx, datagram_sender_rx) = flume::bounded(100);
-        let udp_recv_map = Arc::new(DashMap::new());
-        start_udp_session_cleaner(udp_recv_map.clone(), connect_timeout, connect_timeout);
 
         let mut auth_hash = None;
         if !tls.enable_jls {
@@ -106,18 +89,11 @@ impl ShadowQuicOutbound {
             idle_timeout,
             auth_hash,
             udp_mod,
-            waiting_datagram_buffer: Arc::new(DashMap::new()),
-            udp_recv_map_notify: Arc::new(KeyedNotify::new()),
-            client: Mutex::new(None),
-            connection: Mutex::new(None),
+            cached: Mutex::new(None),
             dns_server_name: cfg.dns.clone(),
             bind_interface: cfg.bind_interface.clone(),
             congestion_controller: cfg.congestion_controller.clone(),
-            next_context_id: AtomicU16::new(1),
-            datagram_sender_tx,
-            datagram_sender_rx,
             enable_gso: cfg.gso,
-            udp_recv_map,
         }))
     }
 
@@ -125,33 +101,22 @@ impl ShadowQuicOutbound {
         self.connect_timeout
     }
 
-    async fn clear_cached_connection(&self, conn: &Arc<quinn::Connection>) {
-        let should_clear = {
-            let lock = self.connection.lock().await;
-            lock.as_ref()
-                .is_some_and(|cached| Arc::ptr_eq(cached, conn))
-        };
-
-        if should_clear {
-            let mut lock = self.connection.lock().await;
-            *lock = None;
-            let mut client = self.client.lock().await;
-            *client = None;
-        }
+    async fn clear_cache(&self) {
+        let mut lock = self.cached.lock().await;
+        *lock = None;
     }
 
-    async fn ensure_connection(&self) -> anyhow::Result<Arc<quinn::Connection>> {
-        let mut lock = self.connection.lock().await;
-
-        if let Some(conn) = lock.as_ref() {
-            match conn.close_reason() {
-                Some(r) => {
-                    info!("exists connection closed: {}", r);
-                }
-                None => {
+    async fn ensure_connection(
+        &self,
+    ) -> anyhow::Result<(Arc<quinn::Connection>, Arc<PerConnectionState>)> {
+        {
+            let lock = self.cached.lock().await;
+            if let Some((ref conn, _, ref state)) = *lock {
+                if conn.close_reason().is_none() {
                     info!("reuse quic connection {}", conn.stable_id());
-                    return Ok(conn.clone());
+                    return Ok((conn.clone(), state.clone()));
                 }
+                info!("exists connection closed: {:?}", conn.close_reason());
             }
         }
 
@@ -198,8 +163,10 @@ impl ShadowQuicOutbound {
             })?;
 
         info!("new quic connection");
-        *self.client.lock().await = Some(client);
-        *lock = Some(conn.clone());
+
+        let (state, datagram_sender_rx) = PerConnectionState::new(100);
+        let state = Arc::new(state);
+        start_udp_session_cleaner(state.udp_recv_map.clone(), self.idle_timeout, self.idle_timeout);
 
         if let Some(auth_hash) = self.auth_hash {
             match conn.open_bi().await {
@@ -219,34 +186,43 @@ impl ShadowQuicOutbound {
             }
         }
 
-        // one connection start once
         let conn_clone = conn.clone();
         match self.udp_mod {
             UdpMode::OverStream => start_unistream_listener(
                 conn_clone,
-                self.udp_recv_map.clone(),
-                self.udp_recv_map_notify.clone(),
+                state.udp_recv_map.clone(),
+                state.udp_recv_map_notify.clone(),
                 self.connect_timeout(),
             ),
             UdpMode::OverDatagram => start_datagram_loop(
                 conn_clone,
-                self.udp_recv_map.clone(),
-                self.waiting_datagram_buffer.clone(),
-                self.udp_recv_map_notify.clone(),
-                self.datagram_sender_rx.clone(),
+                state.udp_recv_map.clone(),
+                state.waiting_datagram_buffer.clone(),
+                state.udp_recv_map_notify.clone(),
+                datagram_sender_rx,
             ),
         }
-        Ok(conn)
+
+        {
+            let mut lock = self.cached.lock().await;
+            *lock = Some((conn.clone(), client, state.clone()));
+        }
+
+        Ok((conn, state))
     }
 
     async fn open_bistream_with_retry(
         &self,
-    ) -> anyhow::Result<(Arc<quinn::Connection>, quinn::SendStream, quinn::RecvStream)> {
-        let conn = self.ensure_connection().await?;
+    ) -> anyhow::Result<(
+        Arc<quinn::Connection>,
+        quinn::SendStream,
+        quinn::RecvStream,
+        Arc<PerConnectionState>,
+    )> {
+        let (conn, state) = self.ensure_connection().await?;
 
         match conn.open_bi().await {
-            // 成功时直接解构元组
-            Ok((send, recv)) => Ok((conn, send, recv)),
+            Ok((send, recv)) => Ok((conn, send, recv, state)),
 
             Err(e) => {
                 warn!(
@@ -254,50 +230,43 @@ impl ShadowQuicOutbound {
                     e
                 );
 
-                // 1. 发现失效，清除缓存
-                self.clear_cached_connection(&conn).await;
+                self.clear_cache().await;
 
-                // 2. 重新获取连接（通常内部会触发重新握手）
-                let retry_conn = self.ensure_connection().await?;
+                let (retry_conn, state) = self.ensure_connection().await?;
 
-                // 3. 再次尝试打开双向流
                 let (send, recv) = retry_conn
                     .open_bi()
                     .await
                     .with_context(|| "failed to open bistream after reconnection")?;
 
-                Ok((retry_conn, send, recv))
+                Ok((retry_conn, send, recv, state))
             }
         }
     }
 
     async fn open_unistream_with_retry(
         &self,
-    ) -> anyhow::Result<(Arc<quinn::Connection>, quinn::SendStream)> {
-        let conn = self.ensure_connection().await?;
+    ) -> anyhow::Result<(Arc<quinn::Connection>, quinn::SendStream, Arc<PerConnectionState>)> {
+        let (conn, state) = self.ensure_connection().await?;
 
-        // 尝试第一次打开流
         match conn.open_uni().await {
-            Ok(send) => Ok((conn, send)),
+            Ok(send) => Ok((conn, send, state)),
             Err(e) => {
                 warn!(
                     "Cached ShadowQuic connection invalid (error: {}), retrying with new connection",
                     e
                 );
 
-                // 1. 清理旧连接
-                self.clear_cached_connection(&conn).await;
+                self.clear_cache().await;
 
-                // 2. 获取新连接（ensure_connection 内部逻辑应包含重新拨号）
-                let retry_conn = self.ensure_connection().await?;
+                let (retry_conn, state) = self.ensure_connection().await?;
 
-                // 3. 再次尝试，直接使用 ? 抛出 anyhow 错误
                 let send = retry_conn
                     .open_uni()
                     .await
                     .context("failed to open unistream after reconnection")?;
 
-                Ok((retry_conn, send))
+                Ok((retry_conn, send, state))
             }
         }
     }
@@ -326,7 +295,7 @@ impl AnyOutbound for ShadowQuicOutbound {
     }
 
     async fn connect_stream_base(&self) -> anyhow::Result<AnyStream> {
-        let (conn, send, recv) = self.open_bistream_with_retry().await?;
+        let (conn, send, recv, _state) = self.open_bistream_with_retry().await?;
 
         let stats = conn.stats();
         let packet_loss_rate =
@@ -360,15 +329,13 @@ impl AnyOutbound for ShadowQuicOutbound {
     }
 
     async fn connect_packet(&self, target: &TargetAddr) -> anyhow::Result<Arc<dyn AnyPacket>> {
-        // open control bistream
-        let (_conn, send, recv) = self.open_bistream_with_retry().await?;
+        let (_conn, send, recv, state) = self.open_bistream_with_retry().await?;
         let mut bistream = Box::new(QuinnBistream::new(send, recv));
 
         let target_bytes = target.to_bytes();
         let target_bytes_dummy = TargetAddr::dummy().to_bytes();
 
-        // send header with control_bistream
-        let send_context_id = self.next_context_id.fetch_add(1, Ordering::SeqCst);
+        let send_context_id = state.next_context_id.fetch_add(1, Ordering::SeqCst);
         let mut packet = Vec::with_capacity(1 + target_bytes.len() + 2 + target_bytes_dummy.len());
         match self.udp_mod {
             UdpMode::OverStream => {
@@ -384,20 +351,19 @@ impl AnyOutbound for ShadowQuicOutbound {
         bistream.write_all(&packet).await?;
         bistream.flush().await?;
 
-        let receiver = Arc::new(ShadowUdpReceiver::new(self.udp_recv_map.clone()));
+        let receiver = Arc::new(ShadowUdpReceiver::new(state.udp_recv_map.clone()));
         run_bistream_recv_listener(
             bistream,
-            self.udp_recv_map.clone(),
+            state.udp_recv_map.clone(),
             receiver.clone(),
-            self.udp_recv_map_notify.clone(),
+            state.udp_recv_map_notify.clone(),
             None,
         );
 
-        // setup sender
         let out_packet: Arc<dyn AnyPacket>;
         match self.udp_mod {
             UdpMode::OverStream => {
-                let (_conn, uni_send) = self.open_unistream_with_retry().await?;
+                let (_conn, uni_send, _state) = self.open_unistream_with_retry().await?;
 
                 let send_mutex = Arc::new(Mutex::new(uni_send));
 
@@ -418,7 +384,7 @@ impl AnyOutbound for ShadowQuicOutbound {
             UdpMode::OverDatagram => {
                 out_packet = Arc::new(ShadowQuicUdpPacket::new(
                     None,
-                    Some(self.datagram_sender_tx.clone()),
+                    Some(state.datagram_sender_tx.clone()),
                     send_context_id,
                     target.clone(),
                     receiver,
