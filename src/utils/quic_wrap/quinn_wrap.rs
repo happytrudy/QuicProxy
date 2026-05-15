@@ -458,8 +458,8 @@ impl QuinnClient {
         transport_config.datagram_receive_buffer_size(Some(QUIC_DATAGRAM_BUFFER_SIZE));
         transport_config.datagram_send_buffer_size(QUIC_DATAGRAM_BUFFER_SIZE);
         transport_config.enable_segmentation_offload(enable_gso);
-        transport_config.initial_mtu(1400);
-        transport_config.min_mtu(1400);
+        transport_config.initial_mtu(initial_mtu);
+        transport_config.min_mtu(min_mtu);
 
         let mtudis = if enable_mtudis {
             let mut mtudis = MtuDiscoveryConfig::default();

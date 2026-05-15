@@ -1,13 +1,11 @@
 use anyhow::bail;
 use async_trait::async_trait;
-use bytes::Bytes;
 use quinn::VarInt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::InboundConfig;
 use crate::proxy::inbound::AnyInbound;
@@ -84,7 +82,6 @@ impl ShadowQuicInbound {
         router: Arc<Router>,
         inbound_tag: &str,
         udp_recv_map: UdpRecvMap,
-        datagram_sender_tx: UnboundedSender<Bytes>,
         conn: Arc<quinn::Connection>,
         send_context_id: u16,
         idle_timeout: Duration,
@@ -129,19 +126,19 @@ impl ShadowQuicInbound {
 
                 out_packet = Arc::new(ShadowQuicUdpPacket::new(
                     Some(send_mutex),
-                    None,
                     send_context_id,
                     target,
                     receiver.clone(),
+                    conn.clone(),
                 ));
             }
             UdpMode::OverDatagram => {
                 out_packet = Arc::new(ShadowQuicUdpPacket::new(
                     None,
-                    Some(datagram_sender_tx.clone()),
                     send_context_id,
                     target,
                     receiver.clone(),
+                    conn.clone(),
                 ));
             }
         }
@@ -205,9 +202,7 @@ impl AnyInbound for ShadowQuicInbound {
                     let router_clone = router.clone();
                     info!("Accepted QUIC connection from {}", conn.remote_address());
 
-                    let (per_conn, datagram_sender_rx) = PerConnectionState::new();
-                    let per_conn = Arc::new(per_conn);
-                    let mut datagram_sender_rx = Some(datagram_sender_rx);
+                    let per_conn = Arc::new(PerConnectionState::new());
                     start_udp_session_cleaner(
                         per_conn.udp_recv_map.clone(),
                         session_timeout,
@@ -223,7 +218,7 @@ impl AnyInbound for ShadowQuicInbound {
                             let mut is_authed = !auth_hash.is_some();
                             let mut services_started = false;
 
-                            let mut start_services = || {
+                            let start_services = || {
                                 start_unistream_listener(
                                     conn_clone.clone(),
                                     per_conn.udp_recv_map.clone(),
@@ -235,7 +230,6 @@ impl AnyInbound for ShadowQuicInbound {
                                     per_conn.udp_recv_map.clone(),
                                     per_conn.waiting_datagram_buffer.clone(),
                                     per_conn.udp_recv_map_notify.clone(),
-                                    datagram_sender_rx.take().unwrap(),
                                 );
                             };
 
@@ -318,7 +312,6 @@ impl AnyInbound for ShadowQuicInbound {
                                                     router,
                                                     tag.as_str(),
                                                     per_conn.udp_recv_map.clone(),
-                                                    per_conn.datagram_sender_tx.clone(),
                                                     conn_clone2.clone(),
                                                     context_id,
                                                     session_timeout_val,

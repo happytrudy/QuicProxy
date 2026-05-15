@@ -483,7 +483,7 @@ impl Router {
             out_packet
                 .send_to(Bytes::copy_from_slice(packet), target_addr, source_addr)
                 .await?;
-            debug!(
+            trace!(
                 "send {} from {} to {}",
                 packet.len(),
                 source_addr,

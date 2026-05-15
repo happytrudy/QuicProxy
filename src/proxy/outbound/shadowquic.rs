@@ -179,8 +179,7 @@ impl ShadowQuicOutbound {
 
         info!("new quic connection");
 
-        let (state, datagram_sender_rx) = PerConnectionState::new();
-        let state = Arc::new(state);
+        let state = Arc::new(PerConnectionState::new());
         start_udp_session_cleaner(
             state.udp_recv_map.clone(),
             self.idle_timeout,
@@ -218,7 +217,6 @@ impl ShadowQuicOutbound {
                 state.udp_recv_map.clone(),
                 state.waiting_datagram_buffer.clone(),
                 state.udp_recv_map_notify.clone(),
-                datagram_sender_rx,
             ),
         }
 
@@ -352,7 +350,7 @@ impl AnyOutbound for ShadowQuicOutbound {
     }
 
     async fn connect_packet(&self, target: &TargetAddr) -> anyhow::Result<Arc<dyn AnyPacket>> {
-        let (_conn, send, recv, state) = self.open_bistream_with_retry().await?;
+        let (conn, send, recv, state) = self.open_bistream_with_retry().await?;
         let mut bistream = Box::new(QuinnBistream::new(send, recv));
 
         let target_bytes = target.to_bytes();
@@ -398,19 +396,19 @@ impl AnyOutbound for ShadowQuicOutbound {
 
                 out_packet = Arc::new(ShadowQuicUdpPacket::new(
                     Some(send_mutex),
-                    None,
                     send_context_id,
                     target.clone(),
                     receiver,
+                    conn.clone(),
                 ));
             }
             UdpMode::OverDatagram => {
                 out_packet = Arc::new(ShadowQuicUdpPacket::new(
                     None,
-                    Some(state.datagram_sender_tx.clone()),
                     send_context_id,
                     target.clone(),
                     receiver,
+                    conn.clone(),
                 ));
             }
         }
