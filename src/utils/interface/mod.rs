@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::broadcast;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use super::shutdown;
 
@@ -38,22 +38,16 @@ pub struct InterfaceInfo {
 
 impl InterfaceInfo {
     pub fn display_name(&self) -> String {
-        match &self.friendly_name {
-            Some(friendly) if !friendly.is_empty() && friendly != &self.name => {
-                if friendly.ends_with(&format!("({})", self.name)) {
-                    friendly.clone()
-                } else {
-                    format!(
-                        "{} ({} {} {})",
-                        friendly,
-                        self.name,
-                        self.index.to_string(),
-                        self.gateway.as_deref().unwrap_or(""),
-                    )
-                }
-            }
-            _ => self.name.clone(),
-        }
+        let friendly = self.friendly_name.as_deref().unwrap_or("");
+
+        format!(
+            "{} ({} {} {} {})",
+            friendly,
+            self.name,
+            self.index.to_string(),
+            self.gateway.as_deref().unwrap_or(""),
+            self.is_usable(),
+        )
     }
 
     pub fn has_ipv4(&self) -> bool {
@@ -65,18 +59,7 @@ impl InterfaceInfo {
     }
 
     pub fn is_usable(&self) -> bool {
-        let usable = self.is_up && !self.is_loopback && (self.has_ipv4() || self.has_ipv6());
-
-        #[cfg(target_os = "android")]
-        {
-            // On Android, getting the gateway often fails due to permissions,
-            // so we don't strictly require it to be present.
-            usable
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            usable && self.gateway.is_some()
-        }
+        return self.is_up && !self.is_loopback && (self.has_ipv4() || self.has_ipv6());
     }
 
     pub fn set_dns(&self, dns: &[IpAddr]) -> std::io::Result<()> {
@@ -264,6 +247,7 @@ impl InterfaceManager {
         debug!("found {} ifaces", interfaces.len());
 
         for iface in &interfaces {
+            trace!("ifaces {:?}", iface.display_name());
             if !iface.is_usable() || Self::is_likely_vpn(&iface.name) {
                 continue;
             }
@@ -295,7 +279,6 @@ pub fn resolve_iface(name: &str, addr: Option<Ipv4Addr>) -> std::io::Result<Arc<
     let interfaces = InterfaceManager::list_ifaces();
 
     for iface in interfaces {
-        // info!("{}", iface.display_name());
         if iface.name == name || iface.ipv4.iter().any(|ip| ip != "" && ip == &a) {
             return Ok(iface);
         }
