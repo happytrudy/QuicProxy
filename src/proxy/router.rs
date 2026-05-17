@@ -483,12 +483,7 @@ impl Router {
             out_packet
                 .send_to(Bytes::copy_from_slice(packet), target_addr, source_addr)
                 .await?;
-            trace!(
-                "send {} from {} to {}",
-                packet.len(),
-                source_addr,
-                target_addr
-            );
+            debug!("send 1 packets from {} to {}", source_addr, target_addr);
         }
 
         // ==========================================
@@ -553,7 +548,7 @@ impl Router {
                 loop {
                     match t2_out.recv_many().await {
                         Ok(packets) => {
-                            trace!(
+                            debug!(
                                 "receiving {} packets from {} to {}",
                                 packets.len(),
                                 t2_target,

@@ -71,15 +71,17 @@ pub struct ShadowUdpReceiver {
     recveiver_sender: UnboundedSender<(SourceAddr, Bytes)>, // feed packet to recver
     recveiver: Mutex<UnboundedReceiver<(SourceAddr, Bytes)>>,
 
+    binded_coontext_id: DashMap<u16, SourceAddr>,
+    udp_recv_map_notify: Arc<KeyedNotify>,
+
     udp_recv_map: UdpRecvMap,
     closer: Arc<SessionCloser>,
 
     create_at: Instant, // check for bistream delay but packet(unistream or datagram) had arrived
-    is_binded_bistream: std::sync::atomic::AtomicBool,
 }
 
 impl ShadowUdpReceiver {
-    pub fn new(udp_recv_map: UdpRecvMap) -> Self {
+    pub fn new(udp_recv_map: UdpRecvMap, udp_recv_map_notify: Arc<KeyedNotify>) -> Self {
         let (sender, recver) = mpsc::unbounded_channel();
         let closer = Arc::new(SessionCloser::new());
 
@@ -88,7 +90,8 @@ impl ShadowUdpReceiver {
             recveiver: Mutex::new(recver),
             create_at: now(),
             udp_recv_map,
-            is_binded_bistream: std::sync::atomic::AtomicBool::new(false),
+            binded_coontext_id: DashMap::new(),
+            udp_recv_map_notify,
             closer,
         }
     }
@@ -97,18 +100,22 @@ impl ShadowUdpReceiver {
     pub fn run_unistream_worker(
         &self,
         unistream: Arc<Mutex<quinn::RecvStream>>,
-        remote_src: TargetAddr,
-        recv_context_id: u16,
-    ) {
+        context_id: u16,
+    ) -> anyhow::Result<()> {
+        let remote_src = match self.binded_coontext_id.get(&context_id) {
+            Some(r) => r,
+            None => bail!("can not find binded context_id"),
+        };
         let closer_clone = self.closer.clone();
         let sender_clone = self.recveiver_sender.clone();
         let udp_recv_map_clone = self.udp_recv_map.clone();
-        debug!("accept_uni for udp session: {}", recv_context_id);
+        let remote_src = remote_src.clone();
+        debug!("accept_uni for udp session: {}", context_id);
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = closer_clone.wait() => {
-                        debug!("unistream_worker: recv closer signal, id: {}", recv_context_id);
+                        debug!("unistream_worker: recv closer signal, id: {}", context_id);
                         break;
                     }
 
@@ -128,12 +135,12 @@ impl ShadowUdpReceiver {
                             Ok(data) => {
                                 if let Err(e) = sender_clone.send((remote_src.clone(), data)) {
                                     closer_clone.close();
-                                    error!("unistream failed to send packet to sender: {}, id: {}", e, recv_context_id);
+                                    error!("unistream failed to send packet to sender: {}, id: {}", e, context_id);
                                     break;
                                 }
                             }
                             Err(e) => {
-                                debug!("unistream {} closed: {}", recv_context_id, e);
+                                debug!("unistream {} closed: {}", context_id, e);
                                 break;
                             }
                         }
@@ -141,18 +148,52 @@ impl ShadowUdpReceiver {
                 }
             }
 
-            udp_recv_map_clone.remove(&recv_context_id);
+            udp_recv_map_clone.remove(&context_id);
             closer_clone.close();
         });
+
+        Ok(())
     }
 
-    pub fn feed_datagram(&self, payload: Bytes, remote_src: TargetAddr) {
-        match self.recveiver_sender.send((remote_src.clone(), payload)) {
-            Ok(_) => {}
-            Err(e) => {
-                error!("failed to feed datagram: {}", e);
-                self.closer.close();
-            }
+    pub fn feed_datagram(&self, payload: Bytes, context_id: u16) -> anyhow::Result<()> {
+        if let Some(remote_src) = self.binded_coontext_id.get(&context_id) {
+            match self.recveiver_sender.send((remote_src.clone(), payload)) {
+                Ok(_) => {}
+                Err(e) => {
+                    self.closer.close();
+                    bail!("failed to feed datagram: {}", e);
+                }
+            };
+        } else {
+            bail!("can not feed_datagram to a unknow context_id");
+        }
+
+        Ok(())
+    }
+
+    pub fn bind_context_id(
+        &self,
+        remote_src: TargetAddr,
+        context_id: u16,
+        myself: Arc<ShadowUdpReceiver>,
+    ) {
+        self.binded_coontext_id
+            .insert(context_id, remote_src.clone());
+        self.udp_recv_map.insert(context_id, myself);
+        self.udp_recv_map_notify.notify(&context_id.to_string());
+        debug!("receive context_id {} from {}", context_id, remote_src);
+    }
+
+    pub fn clean(&self) {
+        let keys: Vec<u16> = self
+            .binded_coontext_id
+            .iter()
+            .map(|item| *item.key())
+            .collect();
+
+        for item in keys {
+            self.udp_recv_map_notify.notify(&item.to_string());
+            self.udp_recv_map.remove(&item);
         }
     }
 }
@@ -169,24 +210,10 @@ async fn read_addr_and_context_id(
 
 pub fn run_bistream_recv_listener(
     mut bistream: Box<QuinnBistream>,
-    udp_recv_map: UdpRecvMap,
-    shadowquic_receiver: Arc<ShadowUdpReceiver>,
-    udp_recv_map_notify: Arc<KeyedNotify>,
-    recv_context_id: Option<u16>,
+    receiver: Arc<ShadowUdpReceiver>,
 ) {
-    let receiver_for_spawn = shadowquic_receiver.clone();
-    let closer_clone = shadowquic_receiver.closer.clone();
-    let udp_recv_map_clone = udp_recv_map.clone();
-    shadowquic_receiver
-        .is_binded_bistream
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-
-    let mut context_ids: Vec<u16> = Vec::new();
-    if let Some(recv_context_id) = recv_context_id {
-        context_ids.push(recv_context_id);
-        udp_recv_map_clone.insert(recv_context_id, receiver_for_spawn.clone());
-        udp_recv_map_notify.notify(&recv_context_id.to_string());
-    }
+    let receiver_for_spawn = receiver.clone();
+    let closer_clone = receiver.closer.clone();
 
     let current_span = tracing::Span::current();
 
@@ -200,13 +227,8 @@ pub fn run_bistream_recv_listener(
                     }
                     res = read_addr_and_context_id(&mut bistream) => {
                         match res {
-                            Ok((id, _target)) => {
-                                debug!("received context_id {} from bistream.", id);
-                                if !context_ids.contains(&id) {
-                                    udp_recv_map_clone.insert(id, receiver_for_spawn.clone());
-                                    context_ids.push(id);
-                                    udp_recv_map_notify.notify(&id.to_string());
-                                }
+                            Ok((id, source)) => {
+                                receiver_for_spawn.bind_context_id(source, id, receiver_for_spawn.clone());
                             }
                             Err(e) => {
                                 error!("bistream read error: {}", e);
@@ -217,13 +239,7 @@ pub fn run_bistream_recv_listener(
                 }
             }
 
-            for id in context_ids {
-                debug!("removing {} from udp_recv_map", id);
-                udp_recv_map_clone.remove(&id);
-                let id_string = id.to_string();
-                udp_recv_map_notify.notify(&id_string);
-                udp_recv_map_notify.remove(&id_string);
-            }
+            receiver_for_spawn.clean();
             debug!("bistream recv loop ended");
             closer_clone.close();
         }
@@ -244,9 +260,7 @@ pub fn start_udp_session_cleaner(
 
             for entry in udp_recv_map.iter() {
                 let receiver = entry.value();
-                if !receiver
-                    .is_binded_bistream
-                    .load(std::sync::atomic::Ordering::SeqCst)
+                if receiver.binded_coontext_id.len() == 0
                     && now().duration_since(receiver.create_at) >= timeout
                 {
                     expired_ids.push(*entry.key());
@@ -296,7 +310,6 @@ pub fn start_unistream_listener(
 ) {
     tokio::spawn(async move {
         loop {
-            let remote_src = TargetAddr::Ip(conn.remote_address());
             match conn.accept_uni().await {
                 Ok(mut recv) => {
                     let recv_map_clone = udp_recv_map.clone();
@@ -313,11 +326,7 @@ pub fn start_unistream_listener(
                             )
                             .await?;
 
-                            item.run_unistream_worker(
-                                Arc::new(Mutex::new(recv)),
-                                remote_src.clone(),
-                                recv_context_id,
-                            );
+                            item.run_unistream_worker(Arc::new(Mutex::new(recv)), recv_context_id)?;
 
                             Ok(())
                         }
@@ -361,8 +370,6 @@ pub fn start_datagram_loop(
     let udp_recv_map_notify = udp_recv_map_notify.clone();
 
     tokio::spawn(async move {
-        let remote_src = TargetAddr::Ip(conn.remote_address());
-
         loop {
             match conn.read_datagram().await {
                 Ok(datagram) => {
@@ -371,7 +378,6 @@ pub fn start_datagram_loop(
                         udp_recv_map_notify.clone(),
                         waiting_datagram_buffer.clone(),
                         datagram,
-                        remote_src.clone(),
                     ) {
                         debug!("handle_datagram error: {}", e);
                     }
@@ -390,7 +396,6 @@ fn handle_datagram(
     udp_recv_map_notify: Arc<KeyedNotify>,
     waiting_datagram_buffer: WaitingDatagramBuffer,
     datagram: Bytes,
-    remote_src: TargetAddr,
 ) -> anyhow::Result<()> {
     if datagram.len() <= 2 {
         warn!("Received invalid shadowquic datagram, ignored");
@@ -406,8 +411,7 @@ fn handle_datagram(
     let payload = datagram.slice(2..);
 
     if let Some(item) = udp_recv_map.get(&recv_context_id) {
-        item.feed_datagram(payload, remote_src);
-        return Ok(());
+        return item.feed_datagram(payload, recv_context_id);
     }
 
     let mut is_new = false;
@@ -441,17 +445,18 @@ fn handle_datagram(
 
             let closer = item.closer.clone();
             let mut lock = item_clone.recveiver.lock().await;
-            let addr_clone = remote_src.clone();
 
             loop {
-                let addr_clone = addr_clone.clone();
                 tokio::select! {
                     _ = closer.wait() => {
                         break;
                     }
                     payload = lock.recv() => {
                         if let Some(payload) = payload {
-                            item.feed_datagram(payload, addr_clone);
+                            if let Err(e) = item.feed_datagram(payload, recv_context_id) {
+                                error!("feed_datagram: {}", e);
+                                break;
+                            }
                         }else{
                             break;
                         }
@@ -466,7 +471,6 @@ fn handle_datagram(
         debug!("datagram {} handler loop closed", recv_context_id);
         waiting_datagram_buffer.remove(&recv_context_id);
 
-        // 处理错误
         if let Err(e) = result {
             eprintln!("Task failed: {}", e);
         }
@@ -531,12 +535,12 @@ impl AnyPacket for ShadowQuicUdpPacket {
         packet.extend_from_slice(&buf);
         // self.conn.send_datagram_wait(Bytes::from(packet));
         if let Err(e) = self.conn.send_datagram(Bytes::from(packet)) {
-            warn!("datagram send queue closed: {}", e);
+            warn!("send_datagram: {}", e);
         }
         Ok(buf.len())
     }
 
-    async fn recv_many(&self) -> anyhow::Result<Vec<(TargetAddr, TargetAddr, Bytes)>> {
+    async fn recv_many(&self) -> anyhow::Result<Vec<(SourceAddr, TargetAddr, Bytes)>> {
         let mut rx = self.receiver.recveiver.lock().await;
 
         let mut buffer = Vec::new();
@@ -557,73 +561,8 @@ impl AnyPacket for ShadowQuicUdpPacket {
                 let dst = self.target.clone();
                 Ok((packet.0, dst, packet.1))
             }
-            None => Err(new_io_other_error("recv_from closed.").into()),
+            None => bail!("recv_from closed."),
         }
-    }
-}
-
-pub struct ShadowQuicUdpOverBistream {
-    recv: Mutex<quinn::RecvStream>,
-    send: Mutex<quinn::SendStream>,
-    target: TargetAddr,
-    closer: Arc<SessionCloser>,
-}
-
-impl ShadowQuicUdpOverBistream {
-    pub fn new(
-        recv: Mutex<quinn::RecvStream>,
-        send: Mutex<quinn::SendStream>,
-        target: TargetAddr,
-        closer: Arc<SessionCloser>,
-    ) -> Self {
-        Self {
-            recv,
-            send,
-            target,
-            closer,
-        }
-    }
-}
-
-#[async_trait]
-impl AnyPacket for ShadowQuicUdpOverBistream {
-    fn closer(&self) -> Arc<SessionCloser> {
-        self.closer.clone()
-    }
-
-    async fn send_to(
-        &self,
-        buf: Bytes,
-        _target: &TargetAddr,
-        _from: &SourceAddr,
-    ) -> anyhow::Result<usize> {
-        let mut stream = self.send.lock().await;
-
-        let mut packet = Vec::with_capacity(2 + buf.len());
-        packet.extend_from_slice(&(buf.len() as u16).to_be_bytes());
-        packet.extend_from_slice(&buf);
-        stream.write_all(&packet).await?;
-        stream.flush().await?;
-        Ok(buf.len())
-    }
-
-    async fn recv_from(&self) -> anyhow::Result<(TargetAddr, TargetAddr, Bytes)> {
-        let mut stream = self.recv.lock().await;
-
-        let mut len_buf = [0u8; 2];
-        let l = match stream.read_exact(&mut len_buf).await {
-            Ok(_) => u16::from_be_bytes(len_buf),
-            Err(e) => return Err(new_io_other_error(e.to_string()).into()),
-        };
-        let mut payload = Vec::with_capacity(l as usize);
-
-        stream
-            .read_exact(&mut payload)
-            .await
-            .map_err(|e| new_io_other_error(e.to_string()))?;
-
-        let dummy_target = TargetAddr::dummy();
-        Ok((self.target.clone(), dummy_target, Bytes::from(payload)))
     }
 }
 

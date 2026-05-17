@@ -261,7 +261,7 @@ impl ShadowQuicOutbound {
         }
     }
 
-    async fn open_unistream_with_retry(
+    pub async fn open_unistream_with_retry(
         &self,
     ) -> anyhow::Result<(
         Arc<quinn::Connection>,
@@ -372,19 +372,16 @@ impl AnyOutbound for ShadowQuicOutbound {
         bistream.write_all(&packet).await?;
         bistream.flush().await?;
 
-        let receiver = Arc::new(ShadowUdpReceiver::new(state.udp_recv_map.clone()));
-        run_bistream_recv_listener(
-            bistream,
+        let receiver = Arc::new(ShadowUdpReceiver::new(
             state.udp_recv_map.clone(),
-            receiver.clone(),
             state.udp_recv_map_notify.clone(),
-            None,
-        );
+        ));
+        run_bistream_recv_listener(bistream, receiver.clone());
 
         let out_packet: Arc<dyn AnyPacket>;
         match self.udp_mod {
             UdpMode::OverStream => {
-                let (_conn, uni_send, _state) = self.open_unistream_with_retry().await?;
+                let uni_send = conn.open_uni().await?;
 
                 let send_mutex = Arc::new(Mutex::new(uni_send));
 

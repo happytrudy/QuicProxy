@@ -15,7 +15,7 @@
       ],
       "idle_timeout": 100,
       "mtu": 1424,
-      "auto_route": true
+      "auto_route": false
     },
     "sq_inbound": {
       "type": "shadowquic",
@@ -117,6 +117,7 @@
           "192.168.0.0/16",
           "fd00::/8"
         ],
+        "dns": "local_dns",
         "outbound": "direct"
       },
       {

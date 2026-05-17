@@ -8,6 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use crate::config::InboundConfig;
+use crate::proxy::SourceAddr;
 use crate::proxy::inbound::AnyInbound;
 use crate::proxy::outbound::AnyPacket;
 use crate::proxy::outbound::UdpMode;
@@ -88,11 +89,15 @@ impl ShadowQuicInbound {
         udp_recv_map_notify: Arc<KeyedNotify>,
     ) -> anyhow::Result<()> {
         let recv_context_id = read_context_id(&mut bistream, idle_timeout).await?;
-        debug!("receive context_id {}", recv_context_id);
 
         let receiver = udp_recv_map
             .entry(recv_context_id)
-            .or_insert_with(|| Arc::new(ShadowUdpReceiver::new(udp_recv_map.clone())))
+            .or_insert_with(|| {
+                Arc::new(ShadowUdpReceiver::new(
+                    udp_recv_map.clone(),
+                    udp_recv_map_notify.clone(),
+                ))
+            })
             .clone();
 
         let mut buf = target.to_bytes();
@@ -100,13 +105,13 @@ impl ShadowQuicInbound {
         bistream.write_all(&buf).await?;
         bistream.flush().await?;
 
-        run_bistream_recv_listener(
-            bistream,
-            udp_recv_map,
+        receiver.bind_context_id(
+            SourceAddr::Ip(conn.remote_address()),
+            recv_context_id,
             receiver.clone(),
-            udp_recv_map_notify,
-            Some(recv_context_id),
         );
+        run_bistream_recv_listener(bistream, receiver.clone());
+
 
         let target_clone = target.clone();
 
