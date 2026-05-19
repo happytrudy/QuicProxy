@@ -7,7 +7,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use crate::config::InboundConfig;
-use crate::proxy::SourceAddr;
 use crate::proxy::inbound::AnyInbound;
 use crate::proxy::outbound::UdpMode;
 use crate::proxy::router::Router;
@@ -98,11 +97,7 @@ impl ShadowQuicInbound {
             })
             .clone();
 
-        receiver.bind_context_id(
-            SourceAddr::Ip(conn.remote_address()),
-            recv_context_id,
-            receiver.clone(),
-        );
+        receiver.bind_context_id(target.clone(), recv_context_id, receiver.clone());
         run_bistream_recv_listener(bistream.recv, receiver.clone());
 
         let mut is_over_unistream = false;
@@ -118,6 +113,7 @@ impl ShadowQuicInbound {
 
         let out_packet = Arc::new(ShadowQuicUdpPacket::new(
             is_over_unistream,
+            false,
             receiver,
             send_context_id,
             Arc::new(Mutex::new(bistream.send)),

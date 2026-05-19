@@ -488,7 +488,7 @@ impl Router {
                 final_target
             );
             out_packet
-                .send_to(Bytes::copy_from_slice(packet), &final_target, source_addr)
+                .send_to(Bytes::copy_from_slice(packet), source_addr, &final_target)
                 .await?;
         }
 
@@ -513,19 +513,19 @@ impl Router {
                 loop {
                     match t1_in.recv_many().await {
                         Ok(packets) => {
-                            for (from, target, buf) in &packets {
+                            for (_from, target, buf) in &packets {
                                 let mut t = target;
-                                if *target == t1_final_target {
-                                    t = &t1_target;
+                                if *target == t1_target {
+                                    t = &t1_final_target;
                                 }
                                 debug!(
                                     "sending {} from {} to {}({})",
                                     buf.len(),
-                                    from,
+                                    t1_source,
                                     t,
                                     t1_final_target
                                 );
-                                if let Err(e) = t1_out.send_to(buf.clone(), t, &t1_source).await {
+                                if let Err(e) = t1_out.send_to(buf.clone(), &t1_source, t).await {
                                     error!("{}", e);
                                     break;
                                 }
@@ -557,7 +557,7 @@ impl Router {
                 loop {
                     match t2_out.recv_many().await {
                         Ok(packets) => {
-                            for (from, target, buf) in &packets {
+                            for (from, _target, buf) in &packets {
                                 let mut f = from;
                                 if *from == t2_final_target {
                                     f = &t2_target;
@@ -569,7 +569,7 @@ impl Router {
                                     t2_final_target,
                                     t2_source,
                                 );
-                                if let Err(e) = t2_in.send_to(buf.clone(), &t2_source, f).await {
+                                if let Err(e) = t2_in.send_to(buf.clone(), f, &t2_source).await {
                                     error!("{}", e);
                                     break;
                                 }

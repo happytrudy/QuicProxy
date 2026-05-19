@@ -1,10 +1,10 @@
 use crate::config::InboundConfig;
-use anyhow::Context;
 use crate::proxy::QuicTlsConfig;
 use crate::proxy::outbound::{AnyPacket, AnyStream, PacketInfo};
 use crate::proxy::router::{Router, get_router};
 use crate::proxy::{SourceAddr, TargetAddr, inbound};
 use crate::utils::new_io_other_error;
+use anyhow::Context;
 use async_trait::async_trait;
 use bytes::Bytes;
 use inbound::AnyInbound;
@@ -41,8 +41,8 @@ impl AnyPacket for TrojanInboundPacket {
     async fn send_to(
         &self,
         buf: Bytes,
-        _target: &TargetAddr, // this is the client, we already know it
-        from: &SourceAddr,    // this is the remote address we should put in the header
+        from: &SourceAddr,
+        _target: &TargetAddr,
     ) -> anyhow::Result<usize> {
         let mut packet = from.to_bytes();
         packet.extend_from_slice(&(buf.len() as u16).to_be_bytes());

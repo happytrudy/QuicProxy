@@ -344,8 +344,8 @@ impl AnyPacket for Socks5UdpSocket {
     async fn send_to(
         &self,
         buf: Bytes,
-        target: &TargetAddr,
         _from: &SourceAddr,
+        target: &TargetAddr,
     ) -> anyhow::Result<usize> {
         if *self.abort_rx.borrow() {
             return Err(anyhow::anyhow!("Control stream closed"));
@@ -385,7 +385,7 @@ impl AnyPacket for Socks5UdpSocket {
             }
 
             let mut cursor = std::io::Cursor::new(&buf[3..n]);
-            match futures::executor::block_on(TargetAddr::read_from(&mut cursor)) {
+            match TargetAddr::read_from(&mut cursor).await {
                 Ok(target) => {
                     let header_len = 3 + cursor.position() as usize;
                     if header_len > n {
@@ -393,11 +393,7 @@ impl AnyPacket for Socks5UdpSocket {
                     }
 
                     let _ = buf.split_to(header_len);
-                    let dummy_from = TargetAddr::Ip(std::net::SocketAddr::new(
-                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
-                        0,
-                    ));
-                    return Ok((target, dummy_from, buf.freeze()));
+                    return Ok((target, TargetAddr::dummy(), buf.freeze()));
                 }
                 Err(_) => continue,
             }

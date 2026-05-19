@@ -375,6 +375,7 @@ impl AnyOutbound for ShadowQuicOutbound {
 
         let out_packet = Arc::new(ShadowQuicUdpPacket::new(
             is_over_unistream,
+            true,
             receiver,
             state.next_context_id.clone(),
             Arc::new(Mutex::new(send)),

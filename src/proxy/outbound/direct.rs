@@ -45,7 +45,7 @@ impl AnyPacket for DirectUdpOutbound {
         self.closer.clone()
     }
 
-    async fn send_to(&self, buf: Bytes, target: &TargetAddr, _from: &SourceAddr) -> Result<usize> {
+    async fn send_to(&self, buf: Bytes, _from: &SourceAddr, target: &TargetAddr) -> Result<usize> {
         let ip = match target {
             TargetAddr::Ip(socket_addr) => *socket_addr,
             TargetAddr::Domain(_, _) => {

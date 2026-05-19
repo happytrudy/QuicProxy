@@ -20,10 +20,10 @@ impl AnyPacket for ObservedPacket {
     async fn send_to(
         &self,
         buf: bytes::Bytes,
-        target: &TargetAddr,
         from: &SourceAddr,
+        target: &TargetAddr,
     ) -> anyhow::Result<usize> {
-        let n = self.inner.send_to(buf, target, from).await?;
+        let n = self.inner.send_to(buf, from, target).await?;
         self.observer
             .on_outbound_traffic(&self.outbound_tag, n as u64, 0);
         self.observer

@@ -30,8 +30,8 @@ struct _PoolUdpOutbound {
 
 #[async_trait]
 impl AnyPacket for _PoolUdpOutbound {
-    async fn send_to(&self, buf: Bytes, target: &TargetAddr, from: &SourceAddr) -> Result<usize> {
-        self.inner.send_to(buf, target, from).await
+    async fn send_to(&self, buf: Bytes, from: &SourceAddr, target: &TargetAddr) -> Result<usize> {
+        self.inner.send_to(buf, from, target).await
     }
 
     async fn recv_from(&self) -> Result<PacketInfo> {

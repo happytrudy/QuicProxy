@@ -255,8 +255,8 @@ pub trait AnyPacket: Send + Sync {
     async fn send_to(
         &self,
         _buf: Bytes,
-        _target: &TargetAddr,
         _from: &SourceAddr,
+        _target: &TargetAddr,
     ) -> anyhow::Result<usize> {
         bail!("Not supported")
     }
@@ -268,7 +268,7 @@ pub trait AnyPacket: Send + Sync {
     async fn send_many(&self, items: &[PacketInfo]) -> anyhow::Result<usize> {
         let mut r = 0;
         for (from, target, buf) in items {
-            r += self.send_to(buf.clone(), target, from).await?;
+            r += self.send_to(buf.clone(), from, target).await?;
         }
         Ok(r)
     }
@@ -291,8 +291,8 @@ impl AnyPacket for tokio::net::UdpSocket {
     async fn send_to(
         &self,
         buf: Bytes,
-        target: &TargetAddr,
         _from: &SourceAddr,
+        target: &TargetAddr,
     ) -> anyhow::Result<usize> {
         match target {
             TargetAddr::Ip(addr) => self.send_to(&buf, *addr).await.context("send_to failed"),
@@ -415,10 +415,10 @@ impl AnyPacket for UdpHandler {
     async fn send_to(
         &self,
         buf: Bytes,
-        target: &TargetAddr,
         from: &SourceAddr,
+        target: &TargetAddr,
     ) -> anyhow::Result<usize> {
-        self.udp_tx.send_to(buf, target, from).await
+        self.udp_tx.send_to(buf, from, target).await
     }
 
     async fn recv_from(&self) -> anyhow::Result<PacketInfo> {

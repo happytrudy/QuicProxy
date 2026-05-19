@@ -70,10 +70,10 @@ impl ShadowUdpDatagramBuffer {
 }
 
 pub struct ShadowUdpReceiver {
-    recveiver_sender: UnboundedSender<(SourceAddr, Bytes)>, // feed packet to recver
-    recveiver: Mutex<UnboundedReceiver<(SourceAddr, Bytes)>>,
+    recveiver_sender: UnboundedSender<(TargetAddr, Bytes)>,
+    recveiver: Mutex<UnboundedReceiver<(TargetAddr, Bytes)>>,
 
-    binded_coontext_id: DashMap<u16, SourceAddr>,
+    binded_coontext_id: DashMap<u16, TargetAddr>,
     udp_recv_map_notify: Arc<KeyedNotify>,
 
     udp_recv_map: UdpRecvMap,
@@ -158,8 +158,8 @@ impl ShadowUdpReceiver {
     }
 
     pub fn feed_datagram(&self, payload: Bytes, context_id: u16) -> anyhow::Result<()> {
-        if let Some(remote_src) = self.binded_coontext_id.get(&context_id) {
-            match self.recveiver_sender.send((remote_src.clone(), payload)) {
+        if let Some(target) = self.binded_coontext_id.get(&context_id) {
+            match self.recveiver_sender.send((target.clone(), payload)) {
                 Ok(_) => {}
                 Err(e) => {
                     self.closer.close();
@@ -175,15 +175,14 @@ impl ShadowUdpReceiver {
 
     pub fn bind_context_id(
         &self,
-        remote_src: TargetAddr,
+        target: TargetAddr,
         context_id: u16,
         myself: Arc<ShadowUdpReceiver>,
     ) {
-        self.binded_coontext_id
-            .insert(context_id, remote_src.clone());
+        self.binded_coontext_id.insert(context_id, target.clone());
         self.udp_recv_map.insert(context_id, myself);
         self.udp_recv_map_notify.notify(&context_id.to_string());
-        debug!("receive context_id {} from {}", context_id, remote_src);
+        debug!("receive context_id {} with address {}", context_id, target);
     }
 
     pub fn clean(&self) {
@@ -482,6 +481,7 @@ fn handle_datagram(
 pub struct ShadowQuicUdpPacket {
     sender_map: DashMap<SourceAddr, SenderMapItem>,
     is_over_unistream: bool,
+    is_client: bool,
 
     conn: Arc<quinn::Connection>,
     control_stream: Arc<Mutex<quinn::SendStream>>,
@@ -493,6 +493,7 @@ pub struct ShadowQuicUdpPacket {
 impl ShadowQuicUdpPacket {
     pub fn new(
         is_over_unistream: bool,
+        is_client: bool,
         receiver: Arc<ShadowUdpReceiver>,
         next_context_id: Arc<AtomicU16>,
         control_stream: Arc<Mutex<quinn::SendStream>>,
@@ -501,6 +502,7 @@ impl ShadowQuicUdpPacket {
         Self {
             sender_map: DashMap::new(),
             is_over_unistream,
+            is_client,
             control_stream,
             next_context_id,
             receiver,
@@ -564,11 +566,15 @@ impl AnyPacket for ShadowQuicUdpPacket {
     async fn send_to(
         &self,
         buf: Bytes,
-        _target: &TargetAddr,
         from: &SourceAddr,
+        target: &TargetAddr,
     ) -> anyhow::Result<usize> {
+        let mut context_addr = from;
+        if self.is_client {
+            context_addr = target;
+        }
         if self.is_over_unistream {
-            let (_, lock) = self.get_send_context_id(from).await?;
+            let (_, lock) = self.get_send_context_id(context_addr).await?;
             let lock = lock.expect("should be unistream");
             let mut stream = lock.lock().await;
             let mut packet = Vec::with_capacity(2 + buf.len());
@@ -579,7 +585,7 @@ impl AnyPacket for ShadowQuicUdpPacket {
             return Ok(buf.len());
         }
 
-        let (send_context_id, _) = self.get_send_context_id(from).await?;
+        let (send_context_id, _) = self.get_send_context_id(context_addr).await?;
         let mut packet = Vec::with_capacity(2 + buf.len());
         packet.extend_from_slice(&send_context_id.to_be_bytes());
         packet.extend_from_slice(&buf);
@@ -594,10 +600,14 @@ impl AnyPacket for ShadowQuicUdpPacket {
         let mut rx = self.receiver.recveiver.lock().await;
 
         let mut buffer = Vec::new();
-        let _left = rx.recv_many(&mut buffer, 100).await;
+        let _left = rx.recv_many(&mut buffer, 10).await;
         let mut results = Vec::with_capacity(buffer.len());
         for item in buffer {
-            results.push((item.0, TargetAddr::dummy(), item.1));
+            if self.is_client {
+                results.push((item.0, TargetAddr::dummy(), item.1));
+            } else {
+                results.push((TargetAddr::Ip(self.conn.remote_address()), item.0, item.1));
+            }
         }
         Ok(results)
     }
@@ -606,7 +616,13 @@ impl AnyPacket for ShadowQuicUdpPacket {
         let mut rx = self.receiver.recveiver.lock().await;
 
         match rx.recv().await {
-            Some(packet) => Ok((packet.0, TargetAddr::dummy(), packet.1)),
+            Some(item) => {
+                if self.is_client {
+                    Ok((item.0, TargetAddr::dummy(), item.1))
+                } else {
+                    Ok((TargetAddr::Ip(self.conn.remote_address()), item.0, item.1))
+                }
+            }
             None => bail!("recv_from closed."),
         }
     }
