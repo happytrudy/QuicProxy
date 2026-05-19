@@ -466,24 +466,30 @@ impl Router {
     pub async fn dispatch_packet(
         &self,
         in_packet: Arc<dyn AnyPacket>,
-        target_addr: &TargetAddr,
+        original_target: &TargetAddr,
         source_addr: &SourceAddr,
         inbound_tag: &str,
         payload: Option<&[u8]>,
         timeout_duration: Duration,
         reset: Option<Arc<Notify>>,
     ) -> anyhow::Result<()> {
-        let out_packet = self
-            ._dispatch_packet(source_addr, target_addr, inbound_tag, payload)
+        let (out_packet, final_target) = self
+            ._dispatch_packet(source_addr, original_target, inbound_tag, payload)
             .await?;
         let out_packet_closer = out_packet.closer();
         let in_packet_closer = in_packet.closer();
 
         if let Some(packet) = payload {
+            debug!(
+                "sending {} from {} to {}({})",
+                packet.len(),
+                source_addr,
+                original_target,
+                final_target
+            );
             out_packet
-                .send_to(Bytes::copy_from_slice(packet), target_addr, source_addr)
+                .send_to(Bytes::copy_from_slice(packet), &final_target, source_addr)
                 .await?;
-            trace!("send 1 packets from {} to {}", source_addr, target_addr);
         }
 
         // ==========================================
@@ -499,22 +505,30 @@ impl Router {
         let t1_out = out_packet.clone();
         let t1_activity = last_activity.clone();
         let t1_source = source_addr.clone();
-        let t1_target = target_addr.clone();
+        let t1_target = original_target.clone();
+        let t1_final_target = final_target.clone();
 
         let mut t1 = tokio::spawn(
             async move {
                 loop {
                     match t1_in.recv_many().await {
                         Ok(packets) => {
-                            trace!(
-                                "sending {} packets from {} to {}",
-                                packets.len(),
-                                t1_source,
-                                t1_target
-                            );
-                            if let Err(e) = t1_out.send_many(&packets).await {
-                                info!("UDP session quit because [outbound err: {:#}]", e);
-                                break;
+                            for (from, target, buf) in &packets {
+                                let mut t = target;
+                                if *target == t1_final_target {
+                                    t = &t1_target;
+                                }
+                                debug!(
+                                    "sending {} from {} to {}({})",
+                                    buf.len(),
+                                    from,
+                                    t,
+                                    t1_final_target
+                                );
+                                if let Err(e) = t1_out.send_to(buf.clone(), t, &t1_source).await {
+                                    error!("{}", e);
+                                    break;
+                                }
                             }
                             *t1_activity.lock().unwrap() = Instant::now();
                         }
@@ -535,22 +549,30 @@ impl Router {
         let t2_out = out_packet.clone();
         let t2_activity = last_activity.clone();
         let t2_source = source_addr.clone();
-        let t2_target = target_addr.clone();
+        let t2_target = original_target.clone();
+        let t2_final_target = final_target.clone();
 
         let mut t2 = tokio::spawn(
             async move {
                 loop {
                     match t2_out.recv_many().await {
                         Ok(packets) => {
-                            trace!(
-                                "receiving {} packets from {} to {}",
-                                packets.len(),
-                                t2_target,
-                                t2_source
-                            );
-                            if let Err(e) = t2_in.send_many(&packets).await {
-                                info!("UDP session quit because [inbound err: {:#}]", e);
-                                break;
+                            for (from, target, buf) in &packets {
+                                let mut f = from;
+                                if *from == t2_final_target {
+                                    f = &t2_target;
+                                }
+                                debug!(
+                                    "receiving {} from {}({}) to {}",
+                                    buf.len(),
+                                    f,
+                                    t2_final_target,
+                                    t2_source,
+                                );
+                                if let Err(e) = t2_in.send_to(buf.clone(), &t2_source, f).await {
+                                    error!("{}", e);
+                                    break;
+                                }
                             }
                             *t2_activity.lock().unwrap() = Instant::now();
                         }
@@ -650,7 +672,7 @@ impl Router {
         target_addr: &TargetAddr,
         inbound_tag: &str,
         payload: Option<&[u8]>,
-    ) -> anyhow::Result<Arc<dyn AnyPacket>> {
+    ) -> anyhow::Result<(Arc<dyn AnyPacket>, TargetAddr)> {
         // Match rule to find outbound
         let (outbound, final_target, matched_idx, is_fakeip) = self
             .select_out(target_addr, inbound_tag, Some(NetworkType::Udp), payload)
@@ -688,9 +710,9 @@ impl Router {
                         outbound_tag: tag.clone(),
                         inbound_tag: inbound_tag_str,
                     };
-                    Ok(Arc::new(wrapped))
+                    Ok((Arc::new(wrapped), final_target))
                 } else {
-                    Ok(out_packet)
+                    Ok((out_packet, final_target))
                 }
             }
             Err(e) => {
