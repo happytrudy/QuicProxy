@@ -21,7 +21,7 @@ use crate::utils::new_io_other_error;
 
 use super::{QuicBistream, QuicConnection, QuicUnistream};
 
-pub const MAX_DATAGRAM_WINDOW: usize = 1024 * 500;
+pub const MAX_DATAGRAM_WINDOW: usize = 1024 * 1000;
 
 fn keep_alive_interval_for(idle_timeout: Duration) -> Option<Duration> {
     if idle_timeout.is_zero() {

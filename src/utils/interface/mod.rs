@@ -1,4 +1,5 @@
-use crate::utils::new_io_other_error;
+use crate::utils::net_monitor::stop_network_monitor;
+use anyhow::bail;
 use default_net;
 use serde::Serialize;
 use std::net::{IpAddr, Ipv4Addr};
@@ -106,10 +107,7 @@ impl InterfaceManager {
     }
 
     pub fn shutdown() {
-        #[allow(unused)]
-        {
-            crate::utils::net_monitor::stop_network_monitor();
-        }
+        stop_network_monitor();
         if let Ok(mut lock) = MONITOR_HANDLE.lock() {
             if let Some(handle) = lock.take() {
                 handle.abort();
@@ -270,7 +268,7 @@ impl InterfaceManager {
     }
 }
 
-pub fn resolve_iface(name: &str, addr: Option<Ipv4Addr>) -> std::io::Result<Arc<InterfaceInfo>> {
+pub fn resolve_iface(name: &str, addr: Option<Ipv4Addr>) -> anyhow::Result<Arc<InterfaceInfo>> {
     let a = match addr {
         Some(t) => t.to_string(),
         None => "".to_string(),
@@ -284,8 +282,5 @@ pub fn resolve_iface(name: &str, addr: Option<Ipv4Addr>) -> std::io::Result<Arc<
         }
     }
 
-    Err(new_io_other_error(format!(
-        "TUN interface not found by name={} or ipv4={}",
-        name, a
-    )))
+    bail!("TUN interface not found by name={} or ipv4={}", name, a)
 }

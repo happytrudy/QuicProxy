@@ -3,6 +3,7 @@ use crate::proxy::shadowquic_udp::{
     run_bistream_recv_listener, start_datagram_loop, start_udp_session_cleaner,
     start_unistream_listener,
 };
+use crate::utils::interface::InterfaceManager;
 use crate::utils::quic_wrap::quinn_wrap::QuinnBistream;
 use crate::utils::quic_wrap::quinn_wrap::QuinnClient;
 use anyhow::{Context, Result};
@@ -44,12 +45,14 @@ pub struct ShadowQuicOutbound {
 
     udp_mod: UdpMode,
 
-    cached: Mutex<
-        Option<(
-            Arc<quinn::Connection>,
-            Arc<QuinnClient>,
-            Arc<PerConnectionState>,
-        )>,
+    cached_client: Arc<
+        Mutex<
+            Option<(
+                Arc<quinn::Connection>,
+                Arc<QuinnClient>,
+                Arc<PerConnectionState>,
+            )>,
+        >,
     >,
 }
 
@@ -87,6 +90,18 @@ impl ShadowQuicOutbound {
             tag.clone()
         ))?;
 
+        let cached_client = Arc::new(Mutex::new(None));
+        if let Some(mut rx) = InterfaceManager::subscribe() {
+            let cached_client_cloen = cached_client.clone();
+            tokio::spawn(async move {
+                while let Ok(_) = rx.recv().await {
+                    let mut lock = cached_client_cloen.lock().await;
+                    *lock = None;
+                    info!("reset shadowquic outbound because iface changed");
+                }
+            });
+        }
+
         Ok(Arc::new(Self {
             tag,
             address,
@@ -96,7 +111,7 @@ impl ShadowQuicOutbound {
             idle_timeout,
             auth_hash,
             udp_mod,
-            cached: Mutex::new(None),
+            cached_client,
             dns_server_name: cfg.dns.clone(),
             bind_interface: cfg.bind_interface.clone(),
             congestion_controller: cfg.congestion_controller.clone(),
@@ -112,7 +127,7 @@ impl ShadowQuicOutbound {
     }
 
     async fn clear_cache(&self) {
-        let mut lock = self.cached.lock().await;
+        let mut lock = self.cached_client.lock().await;
         *lock = None;
     }
 
@@ -120,7 +135,7 @@ impl ShadowQuicOutbound {
         &self,
     ) -> anyhow::Result<(Arc<quinn::Connection>, Arc<PerConnectionState>)> {
         {
-            let lock = self.cached.lock().await;
+            let lock = self.cached_client.lock().await;
             if let Some((ref conn, _, ref state)) = *lock {
                 if conn.close_reason().is_none() {
                     info!("reuse quic connection {}", conn.stable_id());
@@ -219,7 +234,7 @@ impl ShadowQuicOutbound {
         }
 
         {
-            let mut lock = self.cached.lock().await;
+            let mut lock = self.cached_client.lock().await;
             *lock = Some((conn.clone(), client, state.clone()));
         }
 
