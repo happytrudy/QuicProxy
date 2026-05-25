@@ -63,7 +63,9 @@ pub async fn new_tcp_stream(
     let domain = socket2::Domain::for_address(endpoint);
     let socket = create_socket(domain, socket2::Type::STREAM)?;
 
-    if let Some(ref iface) = iface {
+    if let Some(ref iface) = iface
+        && !endpoint.ip().is_loopback()
+    {
         bind_to_interface(&socket, iface, domain)?;
 
         #[cfg(target_os = "linux")]
@@ -99,7 +101,10 @@ pub async fn new_udp_socket(
     let domain = resolve_domain(src, family_hint, iface.as_deref());
     let socket = create_socket(domain, socket2::Type::DGRAM)?;
 
-    bind_udp_socket(&socket, src, iface.as_deref(), domain)?;
+    let dst_is_loopback = family_hint.map(|a| a.ip().is_loopback()).unwrap_or(false);
+    if !dst_is_loopback {
+        bind_udp_socket(&socket, src, iface.as_deref(), domain)?;
+    }
 
     set_so_mark(&socket, so_mark)?;
     socket.set_broadcast(true)?; // UDP only

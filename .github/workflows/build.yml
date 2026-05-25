@@ -94,6 +94,13 @@ jobs:
           $dest = Join-Path $destDir "quicproxy_core.exe"
           Copy-Item -Path $exe -Destination $dest -Force
 
+          $wintunDll = "src/premium/wintun/bin/amd64/wintun.dll"
+          if (Test-Path $wintunDll) {
+            Copy-Item -Path $wintunDll -Destination $destDir -Force
+          } else {
+            throw "missing wintun.dll: $wintunDll"
+          }
+
       - name: Compile Inno Setup Installer
         shell: pwsh
         run: |
