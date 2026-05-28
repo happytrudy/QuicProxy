@@ -60,7 +60,12 @@ impl InterfaceInfo {
     }
 
     pub fn is_usable(&self) -> bool {
-        return self.is_up && !self.is_loopback && (self.has_ipv4() || self.has_ipv6());
+        let mut ok = self.is_up && !self.is_loopback && (self.has_ipv4() || self.has_ipv6());
+        #[cfg(windows)]
+        {
+            ok = ok && self.gateway.is_some();
+        }
+        return ok;
     }
 
     pub fn set_dns(&self, dns: &[IpAddr]) -> std::io::Result<()> {
