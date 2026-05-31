@@ -417,6 +417,22 @@ jobs:
           echo "Android Flutter assets:"
           ls -la release-assets/android/
 
+      - name: Create static-named copies for direct download
+        run: |
+          mkdir -p release-assets/static
+
+          cp release-assets/windows-flutter/QuicProxy-Windows-Setup-${{ github.ref_name }}.exe \
+             release-assets/static/QuicProxy-Windows-Setup.exe
+
+          cp release-assets/android/QuicProxy-Android-${{ github.ref_name }}.apk \
+             release-assets/static/QuicProxy-Android.apk
+
+          cp release-assets/linux/quicproxy-core-${{ github.ref_name }}-linux-x64.tar.gz \
+             release-assets/static/quicproxy-core-linux-x64.tar.gz
+
+          echo "Static-named assets:"
+          ls -la release-assets/static/
+
       - name: Publish Release with Core Labels
         uses: softprops/action-gh-release@v2
         with:
@@ -425,6 +441,9 @@ jobs:
             release-assets/windows-core/quicproxy-core-${{ github.ref_name }}-windows-x64.zip
             release-assets/windows-flutter/QuicProxy-Windows-Setup-${{ github.ref_name }}.exe
             release-assets/android/QuicProxy-Android-${{ github.ref_name }}.apk
+            release-assets/static/QuicProxy-Windows-Setup.exe
+            release-assets/static/QuicProxy-Android.apk
+            release-assets/static/quicproxy-core-linux-x64.tar.gz
           generate_release_notes: true
           name: QuicProxy ${{ github.ref_name }} - Core Release
           body: |
