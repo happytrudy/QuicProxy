@@ -80,13 +80,18 @@ pub fn get_default_dns() -> Result<Arc<dyn AnyDNS>> {
 pub async fn resolve_domain(domain: &str, dns_server: Arc<dyn AnyDNS>) -> Result<IpAddr> {
     let now = Instant::now();
     let res = dns_server.lookup(domain, false).await?;
+
+    let ip = res
+        .first()
+        .copied()
+        .with_context(|| format!("DNS lookup failed for: {domain}"))?;
+
     if let Some(observer) = get_observer() {
         observer.record_dns_time(now.elapsed().as_micros() as u64);
+        observer.realip2domain.insert(domain.to_string(), ip.to_string());
     }
 
-    res.first()
-        .copied()
-        .with_context(|| format!("DNS lookup failed for: {domain}"))
+    Ok(ip)
 }
 
 pub async fn resolve_target_base(

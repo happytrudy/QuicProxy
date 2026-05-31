@@ -4,19 +4,17 @@ use crate::proxy::observe::{ConnectionTracker, get_observer};
 use crate::proxy::outbound::pool::POOL_SHOULD_RETRY;
 use crate::proxy::outbound::{AnyOutbound, AnyPacket, AnyStream, UdpHandler, get_default_outbound};
 use crate::proxy::{SessionCloser, SourceAddr, TargetAddr};
-use crate::utils::{copy_bidirectional, format_duration, now, now_timestamp};
+use crate::utils::{copy_bidirectional, format_duration, now};
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use dashmap::DashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 use tokio::sync::{Notify, RwLock, mpsc};
 use tokio::time::sleep;
 use tracing::{Instrument, Span, debug, error, field, info, info_span, trace};
-use uuid::Uuid;
 
 pub use observe::{ObservedPacket, ObservedStream};
 pub use rule::{Rule, RuleAction};
@@ -109,30 +107,6 @@ impl Router {
         *self.mode.write().await = mode;
     }
 
-    fn new_connection_tracker(
-        inbound_tag: String,
-        outbound_tag: String,
-        matched_rule_index: Option<usize>,
-        dst: String,
-        ip: String,
-        is_fakeip: bool,
-        is_udp: bool,
-    ) -> ConnectionTracker {
-        ConnectionTracker {
-            id: Uuid::new_v4().to_string(),
-            inbound_tag,
-            outbound_tag,
-            matched_rule_index,
-            dst,
-            ip,
-            is_fakeip,
-            is_udp,
-            upload: AtomicU64::new(0),
-            download: AtomicU64::new(0),
-            start_time: now_timestamp(),
-        }
-    }
-
     fn wrap_streams_with_observer(
         &self,
         inbound_stream: AnyStream,
@@ -172,12 +146,12 @@ impl Router {
             None
         };
 
-        let tracker = Self::new_connection_tracker(
+        let tracker = ConnectionTracker::new(
             inbound_tag_str,
             outbound_tag.to_string(),
             matched_idx,
-            final_target.to_string(),
-            target.to_string(),
+            final_target.clone(),
+            target.clone(),
             is_fakeip,
             false,
         );
@@ -699,19 +673,22 @@ impl Router {
         // Connect
         match outbound.connect_packet(&final_target).await {
             Ok(out_packet) => {
-                info!("Connected UDP outbound [{}] for {}", tracker_tag, final_target);
+                info!(
+                    "Connected UDP outbound [{}] for {}",
+                    tracker_tag, final_target
+                );
                 // s is already Arc<TrackedPacket>
                 if let Some(obs) = get_observer() {
                     let inbound_tag_str = inbound_tag.to_string();
                     obs.on_inbound_open_udp(&inbound_tag_str);
                     obs.on_outbound_open_udp(&stats_tag);
 
-                    let tracker = Self::new_connection_tracker(
+                    let tracker = ConnectionTracker::new(
                         inbound_tag_str.clone(),
                         tracker_tag.clone(),
                         matched_idx,
-                        final_target.to_string(),
-                        target_addr.to_string(),
+                        final_target.clone(),
+                        target_addr.clone(),
                         is_fakeip,
                         true,
                     );

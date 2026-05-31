@@ -6,8 +6,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::OnceCell;
 use tracing::info;
+use uuid::Uuid;
 
 use crate::utils::format_us;
+use crate::utils::now_timestamp;
 use crate::utils::shutdown;
 use crate::utils::system::get_memory_usage;
 
@@ -24,8 +26,8 @@ pub struct ConnectionTracker {
     pub inbound_tag: String,
     pub outbound_tag: String,
     pub matched_rule_index: Option<usize>,
-    pub dst: String,
-    pub ip: String,
+    pub final_target: TargetAddr,
+    pub origin_target: TargetAddr,
     pub is_fakeip: bool,
     pub is_udp: bool,
     #[serde(serialize_with = "serialize_atomic_u64")]
@@ -36,6 +38,29 @@ pub struct ConnectionTracker {
 }
 
 impl ConnectionTracker {
+    pub fn new(
+        inbound_tag: String,
+        outbound_tag: String,
+        matched_rule_index: Option<usize>,
+        final_target: TargetAddr,
+        origin_target: TargetAddr,
+        is_fakeip: bool,
+        is_udp: bool,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            inbound_tag,
+            outbound_tag,
+            matched_rule_index,
+            origin_target,
+            final_target,
+            is_fakeip,
+            is_udp,
+            upload: AtomicU64::new(0),
+            download: AtomicU64::new(0),
+            start_time: now_timestamp(),
+        }
+    }
     pub fn inc_upload(&self, bytes: u64) {
         self.upload.fetch_add(bytes, Ordering::Relaxed);
     }
@@ -205,10 +230,13 @@ pub struct OutboundTraceInfo {
 
 use crate::proxy::SessionCloser;
 
+use super::TargetAddr;
+
 pub struct Observer {
     inbounds: DashMap<String, Arc<NodeStats>>,
     outbounds: DashMap<String, Arc<NodeStats>>,
     outbound_traces: DashMap<String, OutboundTraceInfo>,
+    pub realip2domain: DashMap<String, String>,
     global_stats: Arc<Stats>,
     connections: DashMap<String, Arc<ConnectionTracker>>,
     closers: DashMap<String, Arc<SessionCloser>>,
@@ -221,6 +249,7 @@ impl Observer {
         Self {
             inbounds: DashMap::new(),
             outbounds: DashMap::new(),
+            realip2domain: DashMap::new(),
             outbound_traces: DashMap::new(),
             global_stats: Arc::new(Stats::default()),
             connections: DashMap::new(),
@@ -251,8 +280,21 @@ impl Observer {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+
+                let dst_key = match &conn.final_target {
+                    TargetAddr::Ip(addr) => {
+                        let ip_str = addr.ip().to_string();
+                        self.realip2domain
+                            .iter()
+                            .find(|r| r.value() == &ip_str)
+                            .map(|r| format!("{}:{}", r.key(), addr.port()))
+                            .unwrap_or_else(|| conn.final_target.to_string())
+                    }
+                    TargetAddr::Domain(..) => conn.final_target.to_string(),
+                };
+
                 self.dst_traffic
-                    .entry(conn.dst.clone())
+                    .entry(dst_key.clone())
                     .and_modify(|e| {
                         e.upload = e.upload.wrapping_add(upload);
                         e.download = e.download.wrapping_add(download);
@@ -262,7 +304,7 @@ impl Observer {
                         }
                     })
                     .or_insert(DstTrafficEntry {
-                        dst: conn.dst.clone(),
+                        dst: dst_key,
                         outbound_tag: conn.outbound_tag.clone(),
                         upload,
                         download,
@@ -306,16 +348,7 @@ impl Observer {
     }
 
     pub fn get_dst_traffic(&self) -> Vec<DstTrafficEntry> {
-        let mut entries: Vec<DstTrafficEntry> = self
-            .dst_traffic
-            .iter()
-            .map(|r| r.value().clone())
-            .collect();
-        entries.sort_by(|a, b| {
-            (b.upload.wrapping_add(b.download))
-                .cmp(&(a.upload.wrapping_add(a.download)))
-        });
-        entries
+        self.dst_traffic.iter().map(|r| r.value().clone()).collect()
     }
 
     pub fn drain_dst_traffic(&self) -> Vec<DstTrafficEntry> {

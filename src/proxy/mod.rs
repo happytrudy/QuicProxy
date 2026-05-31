@@ -7,6 +7,7 @@ pub mod shadowquic_udp;
 use crate::config::{InboundConfig, OutboundConfig};
 use crate::utils::new_io_other_error;
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -17,7 +18,7 @@ use tokio::sync::Notify;
 
 pub type SourceAddr = TargetAddr;
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize)]
 pub enum TargetAddr {
     Ip(SocketAddr),
     Domain(String, u16),
