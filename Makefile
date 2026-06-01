@@ -66,3 +66,19 @@ build-android:
 	# cargo install cargo-ndk
 	rustup target add aarch64-linux-android armv7-linux-androideabi
 	cargo ndk -t arm64-v8a -t armeabi-v7a -o ./src/premium/quicproxy_flutter/android/app/src/main/jniLibs build --release --features "jni,premium" --lib
+
+build-ios:
+	rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+	cargo build --release --target aarch64-apple-ios --features "premium" --lib
+	cargo build --release --target aarch64-apple-ios-sim --features "premium" --lib
+	cargo build --release --target x86_64-apple-ios --features "premium" --lib
+	mkdir -p target/ios-simulator-fat
+	lipo -create \
+		target/aarch64-apple-ios-sim/release/libquicproxy.a \
+		target/x86_64-apple-ios/release/libquicproxy.a \
+		-output target/ios-simulator-fat/libquicproxy.a
+	rm -rf src/premium/quicproxy_flutter/ios/QuicProxyTunnel/QuicProxyCore.xcframework
+	xcodebuild -create-xcframework \
+		-library target/aarch64-apple-ios/release/libquicproxy.a \
+		-library target/ios-simulator-fat/libquicproxy.a \
+		-output src/premium/quicproxy_flutter/ios/QuicProxyTunnel/QuicProxyCore.xcframework

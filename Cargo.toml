@@ -13,7 +13,7 @@ premium = ["dep:tun-rs"]
 
 [lib]
 name = "quicproxy"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 jni = { version = "0.21.1", optional = true }
@@ -54,9 +54,9 @@ tracing-appender = "0.2.4"
 hashbrown = { version = "0.15.2", features = ["serde"] }
 ipnet = "2.11.0"
 netstack-lwip = { git = "https://github.com/eycorsican/netstack-lwip" }
-tun-rs = { version = "2", features = ["async", "async_framed"], optional = true }
+tun-rs = { version = "2", features = ["async", "async_framed", "utun_fd"], optional = true, git = "https://github.com/tun-rs/tun-rs", tag = "2.8.3" }
+netdev = "0.43"
 etherparse = "0.13"
-default-net = "0.22.0"
 libc = "0.2.180"
 tokio-rustls = "0.26.4"
 anyhow = { version = "1.0.101", features = ["backtrace"] }

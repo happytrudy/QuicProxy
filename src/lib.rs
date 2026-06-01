@@ -27,3 +27,6 @@ pub mod premium;
 
 #[cfg(all(feature = "premium", any(target_os = "android", feature = "jni")))]
 pub use premium::android;
+
+#[cfg(all(feature = "premium", target_os = "ios"))]
+pub use premium::ios;

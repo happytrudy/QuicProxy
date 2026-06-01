@@ -1,7 +1,6 @@
 use crate::utils::net_monitor::stop_network_monitor;
 use anyhow::bail;
-use default_net;
-use serde::Serialize;
+use netdev;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::broadcast;
@@ -22,70 +21,64 @@ mod platform;
 #[path = "platform_other.rs"]
 mod platform;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct InterfaceInfo {
-    pub index: u32,
-    pub name: String,
-    pub friendly_name: Option<String>,
-    pub description: Option<String>,
-    pub mac_addr: Option<String>,
-    pub ipv4: Vec<String>,
-    pub ipv6: Vec<String>,
-    pub gateway: Option<String>,
-    pub is_loopback: bool,
-    pub is_up: bool,
-    pub is_multicast: bool,
+pub type InterfaceInfo = netdev::Interface;
+
+pub trait InterfaceInfoExt {
+    fn display_name(&self) -> String;
+    fn is_usable(&self) -> bool;
+    fn set_dns(&self, dns: &[IpAddr]) -> std::io::Result<()>;
+    fn get_dns(&self) -> std::io::Result<Vec<IpAddr>>;
+    fn restore_dns(&self) -> std::io::Result<()>;
+    fn set_metric(&self, metric: u32) -> std::io::Result<()>;
 }
 
-impl InterfaceInfo {
-    pub fn display_name(&self) -> String {
+impl InterfaceInfoExt for netdev::Interface {
+    fn display_name(&self) -> String {
         let friendly = self.friendly_name.as_deref().unwrap_or("");
+        let gateway_str = self
+            .gateway
+            .as_ref()
+            .and_then(|gw| gw.ipv4.first())
+            .map(|ip| ip.to_string())
+            .unwrap_or_default();
 
         format!(
             "{} ({} {} {} {})",
             friendly,
             self.name,
-            self.index.to_string(),
-            self.gateway.as_deref().unwrap_or(""),
+            self.index,
+            gateway_str,
             self.is_usable(),
         )
     }
 
-    pub fn has_ipv4(&self) -> bool {
-        !self.ipv4.is_empty()
-    }
-
-    pub fn has_ipv6(&self) -> bool {
-        !self.ipv6.is_empty()
-    }
-
-    pub fn is_usable(&self) -> bool {
-        let ok = self.is_up && !self.is_loopback && (self.has_ipv4() || self.has_ipv6());
+    fn is_usable(&self) -> bool {
+        let ok = self.is_up() && !self.is_loopback() && (self.has_ipv4() || self.has_ipv6());
         #[cfg(windows)]
         {
             if ok {
                 return self.gateway.is_some();
             }
         }
-        return ok;
+        ok
     }
 
-    pub fn set_dns(&self, dns: &[IpAddr]) -> std::io::Result<()> {
+    fn set_dns(&self, dns: &[IpAddr]) -> std::io::Result<()> {
         if dns.is_empty() {
             return self.restore_dns();
         }
         platform::set_dns(self, dns)
     }
 
-    pub fn get_dns(&self) -> std::io::Result<Vec<IpAddr>> {
+    fn get_dns(&self) -> std::io::Result<Vec<IpAddr>> {
         platform::get_dns(self)
     }
 
-    pub fn restore_dns(&self) -> std::io::Result<()> {
+    fn restore_dns(&self) -> std::io::Result<()> {
         platform::restore_dns(self)
     }
 
-    pub fn set_metric(&self, metric: u32) -> std::io::Result<()> {
+    fn set_metric(&self, metric: u32) -> std::io::Result<()> {
         #[cfg(windows)]
         {
             platform::set_metric(self, metric)
@@ -98,7 +91,7 @@ impl InterfaceInfo {
     }
 }
 
-static DEFAULT_INTERFACE: RwLock<Option<Arc<InterfaceInfo>>> = RwLock::new(None);
+static DEFAULT_INTERFACE: RwLock<Option<Arc<netdev::Interface>>> = RwLock::new(None);
 static MONITOR_HANDLE: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
 static NETWORK_CHANGE_TX: RwLock<Option<broadcast::Sender<()>>> = RwLock::new(None);
 
@@ -123,48 +116,8 @@ impl InterfaceManager {
         }
     }
 
-    pub fn list_ifaces() -> Vec<Arc<InterfaceInfo>> {
-        let interfaces = default_net::get_interfaces();
-        let list_ctx = platform::ListContext::new();
-
-        interfaces
-            .into_iter()
-            .map(|iface| {
-                let ipv4: Vec<String> = iface.ipv4.iter().map(|ip| ip.addr.to_string()).collect();
-                let ipv6: Vec<String> = iface.ipv6.iter().map(|ip| ip.addr.to_string()).collect();
-
-                let mac_addr = iface.mac_addr.as_ref().map(|mac| mac.to_string());
-                let mut gateway = iface.gateway.as_ref().map(|gw| gw.ip_addr.to_string());
-
-                let is_loopback = iface.is_loopback();
-                let is_up = iface.is_up();
-                let is_multicast = iface.is_multicast();
-
-                #[allow(unused_mut)]
-                let mut friendly_name = iface.friendly_name;
-
-                platform::enhance_interface(
-                    &list_ctx,
-                    &iface.name,
-                    &mut friendly_name,
-                    &mut gateway,
-                );
-
-                Arc::new(InterfaceInfo {
-                    index: iface.index,
-                    name: iface.name,
-                    friendly_name,
-                    description: iface.description,
-                    mac_addr,
-                    ipv4,
-                    ipv6,
-                    gateway,
-                    is_loopback,
-                    is_up,
-                    is_multicast,
-                })
-            })
-            .collect()
+    pub fn list_ifaces() -> Vec<Arc<netdev::Interface>> {
+        netdev::get_interfaces().into_iter().map(Arc::new).collect()
     }
 
     pub fn init() {
@@ -228,7 +181,7 @@ impl InterfaceManager {
         }
     }
 
-    pub fn selected_iface() -> Option<Arc<InterfaceInfo>> {
+    pub fn selected_iface() -> Option<Arc<netdev::Interface>> {
         DEFAULT_INTERFACE
             .read()
             .unwrap_or_else(|e| {
@@ -247,7 +200,7 @@ impl InterfaceManager {
         None
     }
 
-    pub fn select_iface() -> Option<Arc<InterfaceInfo>> {
+    pub fn select_iface() -> Option<Arc<netdev::Interface>> {
         let interfaces = Self::list_ifaces();
         debug!("found {} ifaces", interfaces.len());
 
@@ -275,7 +228,7 @@ impl InterfaceManager {
     }
 }
 
-pub fn resolve_iface(name: &str, addr: Option<Ipv4Addr>) -> anyhow::Result<Arc<InterfaceInfo>> {
+pub fn resolve_iface(name: &str, addr: Option<Ipv4Addr>) -> anyhow::Result<Arc<netdev::Interface>> {
     let a = match addr {
         Some(t) => t.to_string(),
         None => "".to_string(),
@@ -284,7 +237,7 @@ pub fn resolve_iface(name: &str, addr: Option<Ipv4Addr>) -> anyhow::Result<Arc<I
     let interfaces = InterfaceManager::list_ifaces();
 
     for iface in interfaces {
-        if iface.name == name || iface.ipv4.iter().any(|ip| ip != "" && ip == &a) {
+        if iface.name == name || iface.ipv4.iter().any(|net| net.addr().to_string() == a) {
             return Ok(iface);
         }
     }

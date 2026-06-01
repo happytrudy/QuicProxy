@@ -3,6 +3,7 @@ use std::io;
 use tracing::warn;
 
 use crate::utils::interface::InterfaceInfo;
+use crate::utils::interface::InterfaceInfoExt;
 use crate::utils::new_io_other_error;
 
 pub(crate) fn must_bind_socket_on_interface(

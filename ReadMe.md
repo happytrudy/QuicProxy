@@ -9,7 +9,7 @@
 | 平台 | 下载 | 说明 |
 |:---:|---|---|
 | 🖥️ **Windows** | [⬇ 下载安装包](https://github.com/RealBikiniBottom/QuicProxy/releases/latest/download/QuicProxy-Windows-Setup.exe) | `.exe` 安装程序 |
-| 📱 **Android** | [⬇ 下载 APK](https://github.com/RealBikiniBottom/QuicProxy/releases/latest/download/QuicProxy-Android.apk) | `.apk` 直接安装 |
+| 📱 **Android** | [⬇ 下载 APK](https://github.com/RealBikiniBottom/QuicProxy/releases/latest/download/QuicProxy-Android.apk) | `.apk` APP |
 | 🐧 **Linux** | [⬇ 一键脚本安装](#三步搭建属于自己的节点) | `curl ... \| sudo bash` |
 | 🍎 **macOS** | *即将发布* | |
 | 📱 **iOS** | *即将发布* | |

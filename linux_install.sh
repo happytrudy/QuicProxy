@@ -263,7 +263,6 @@ write_server_config() {
       "address": "0.0.0.0",
       "port": ${shadowquic_port},
       "idle_timeout": ${idle_timeout},
-      "mtu_discoveriy": false,
       "gso": true,
       "tls": {
         "enable_jls": true,
