@@ -762,6 +762,7 @@ pub struct AnytlsUdpSocket {
     write_tx: tokio::sync::mpsc::UnboundedSender<(u32, u8, Bytes)>,
     event_rx: Mutex<tokio::sync::mpsc::UnboundedReceiver<StreamEvent>>,
     read_buffer: Mutex<Vec<u8>>,
+    is_connect: bool,
 }
 
 impl AnytlsUdpSocket {
@@ -769,6 +770,7 @@ impl AnytlsUdpSocket {
         stream_id: u32,
         session: Arc<Session>,
         event_rx: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+        is_connect: bool,
     ) -> Self {
         Self {
             stream_id,
@@ -776,6 +778,7 @@ impl AnytlsUdpSocket {
             session,
             event_rx: Mutex::new(event_rx),
             read_buffer: Mutex::new(Vec::new()),
+            is_connect,
         }
     }
 
@@ -783,21 +786,35 @@ impl AnytlsUdpSocket {
         loop {
             {
                 let mut buf = self.read_buffer.lock().await;
-                if !buf.is_empty() {
-                    // Peek target to get its length
-                    if let Ok((_, target_len)) = uot_decode_target(&buf) {
-                        if buf.len() >= target_len + 2 {
-                            let payload_len = u16::from_be_bytes([buf[target_len], buf[target_len + 1]]) as usize;
-                            let total_needed = target_len + 2 + payload_len;
-                            if buf.len() >= total_needed {
-                                let msg = Bytes::copy_from_slice(&buf[..total_needed]);
-                                buf.drain(..total_needed);
-                                return Ok(msg);
-                            }
+                if self.is_connect {
+                    // Connect mode: length(u16) + data
+                    if buf.len() >= 2 {
+                        let payload_len =
+                            u16::from_be_bytes([buf[0], buf[1]]) as usize;
+                        let total_needed = 2 + payload_len;
+                        if buf.len() >= total_needed {
+                            let msg = Bytes::copy_from_slice(&buf[..total_needed]);
+                            buf.drain(..total_needed);
+                            return Ok(msg);
                         }
-                    } else if buf.len() > 256 {
-                        // Avoid infinite buffering on invalid data
-                        bail!("invalid UoT packet header");
+                    }
+                } else {
+                    // Non-connect mode: ATYP(uot) + addr + port + length(u16) + data
+                    if !buf.is_empty() {
+                        if let Ok((_, target_len)) = uot_decode_target(&buf) {
+                            if buf.len() >= target_len + 2 {
+                                let payload_len =
+                                    u16::from_be_bytes([buf[target_len], buf[target_len + 1]]) as usize;
+                                let total_needed = target_len + 2 + payload_len;
+                                if buf.len() >= total_needed {
+                                    let msg = Bytes::copy_from_slice(&buf[..total_needed]);
+                                    buf.drain(..total_needed);
+                                    return Ok(msg);
+                                }
+                            }
+                        } else if buf.len() > 256 {
+                            bail!("invalid UoT packet header");
+                        }
                     }
                 }
             }
@@ -831,11 +848,21 @@ impl Drop for AnytlsUdpSocket {
 #[async_trait]
 impl AnyPacket for AnytlsUdpSocket {
     async fn send_to(&self, buf: Bytes, _from: &SourceAddr, target: &TargetAddr) -> Result<usize> {
-        let target_bytes = uot_encode_target(target);
-        let mut packet = Vec::with_capacity(target_bytes.len() + 2 + buf.len());
-        packet.extend_from_slice(&target_bytes);
-        packet.extend_from_slice(&(buf.len() as u16).to_be_bytes());
-        packet.extend_from_slice(&buf);
+        let packet = if self.is_connect {
+            // Connect mode: length(u16) + data
+            let mut p = Vec::with_capacity(2 + buf.len());
+            p.extend_from_slice(&(buf.len() as u16).to_be_bytes());
+            p.extend_from_slice(&buf);
+            p
+        } else {
+            // Non-connect mode: ATYP(uot) + addr + port + length(u16) + data
+            let target_bytes = uot_encode_target(target);
+            let mut p = Vec::with_capacity(target_bytes.len() + 2 + buf.len());
+            p.extend_from_slice(&target_bytes);
+            p.extend_from_slice(&(buf.len() as u16).to_be_bytes());
+            p.extend_from_slice(&buf);
+            p
+        };
 
         self.write_tx
             .send((self.stream_id, Command::Psh as u8, Bytes::from(packet)))
@@ -845,16 +872,31 @@ impl AnyPacket for AnytlsUdpSocket {
 
     async fn recv_from(&self) -> Result<PacketInfo> {
         let data = self.read_next_msg().await?;
-        let (target, target_len) = uot_decode_target(&data)?;
-        if data.len() < target_len + 2 {
-            bail!("UoT packet too short for length");
+        if self.is_connect {
+            // Connect mode: length(u16) + data
+            if data.len() < 2 {
+                bail!("UoT connect packet too short");
+            }
+            let payload_len =
+                u16::from_be_bytes([data[0], data[1]]) as usize;
+            if data.len() < 2 + payload_len {
+                bail!("UoT connect packet too short for payload");
+            }
+            let payload = Bytes::copy_from_slice(&data[2..2 + payload_len]);
+            Ok((TargetAddr::dummy(), TargetAddr::dummy(), payload))
+        } else {
+            // Non-connect mode: ATYP(uot) + addr + port + length(u16) + data
+            let (target, target_len) = uot_decode_target(&data)?;
+            if data.len() < target_len + 2 {
+                bail!("UoT packet too short for length");
+            }
+            let payload_len = u16::from_be_bytes([data[target_len], data[target_len + 1]]) as usize;
+            if data.len() < target_len + 2 + payload_len {
+                bail!("UoT packet too short for payload");
+            }
+            let payload = Bytes::copy_from_slice(&data[target_len + 2..target_len + 2 + payload_len]);
+            Ok((TargetAddr::dummy(), target, payload))
         }
-        let payload_len = u16::from_be_bytes([data[target_len], data[target_len + 1]]) as usize;
-        if data.len() < target_len + 2 + payload_len {
-            bail!("UoT packet too short for payload");
-        }
-        let payload = Bytes::copy_from_slice(&data[target_len + 2..target_len + 2 + payload_len]);
-        Ok((TargetAddr::dummy(), target, payload))
     }
 
     fn closer(&self) -> Arc<SessionCloser> {
@@ -987,15 +1029,15 @@ impl AnyOutbound for AnytlsOutbound {
             .send((stream_id, Command::Psh as u8, Bytes::from(target_data)))
             .context("session write channel closed")?;
 
-        // Send UoT Request header
+        // Send UoT Request header (uses Socksaddr format: ATYP 1/3/4)
         let mut uot_request = vec![0x00]; // IsConnect = false
-        uot_request.extend_from_slice(&target.to_bytes());
+        uot_request.extend_from_slice(&socksaddr_encode_target(target));
         session
             .write_tx
             .send((stream_id, Command::Psh as u8, Bytes::from(uot_request)))
             .context("session write channel closed")?;
 
-        Ok(Arc::new(AnytlsUdpSocket::new(stream_id, session, event_rx)))
+        Ok(Arc::new(AnytlsUdpSocket::new(stream_id, session, event_rx, false)))
     }
 
     async fn retry_connect_stream(&self, target: &TargetAddr) -> Result<AnyStream> {
@@ -1714,7 +1756,7 @@ mod tests {
             .send((stream_id, Command::Psh as u8, Bytes::from(target_data)))
             .expect("send target PSH");
 
-        let udp_socket = AnytlsUdpSocket::new(stream_id, session.clone(), event_rx);
+        let udp_socket = AnytlsUdpSocket::new(stream_id, session.clone(), event_rx, false);
 
         // Send a UDP packet
         let test_data = Bytes::from_static(b"hello udp!");
