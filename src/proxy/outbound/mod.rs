@@ -6,6 +6,7 @@ pub mod selector;
 pub mod shadowquic;
 pub mod socks5;
 pub mod trojan;
+pub mod anytls;
 
 use anyhow::{Context, bail};
 use async_trait::async_trait;
@@ -15,6 +16,7 @@ use dns::DnsOutbound;
 use selector::SelectorOutbound;
 use shadowquic::ShadowQuicOutbound;
 use socks5::Socks5Outbound;
+use anytls::AnytlsOutbound;
 use std::io;
 use std::io::IoSlice;
 use std::net::{IpAddr, SocketAddr};
@@ -66,6 +68,7 @@ pub fn init_outbounds(cfg: &Config) -> anyhow::Result<()> {
             "direct" => DirectOutbound::new(name_str, item)?,
             "shadowquic" => ShadowQuicOutbound::new(name_str, item)?,
             "trojan" => TrojanOutbound::new(name_str, item)?,
+            "anytls" => AnytlsOutbound::new(name_str, item)?,
             "socks5" => Socks5Outbound::new(name_str, item)?,
             "dns" => DnsOutbound::new(name_str, item)?,
             "selector" => SelectorOutbound::new(name_str, item)?,

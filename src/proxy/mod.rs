@@ -1,3 +1,4 @@
+pub mod anytls_proto;
 pub mod inbound;
 pub mod observe;
 pub mod outbound;

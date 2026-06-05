@@ -3,6 +3,7 @@ pub mod mix;
 pub mod shadowquic;
 pub mod socks5;
 pub mod trojan;
+pub mod anytls;
 
 #[cfg(feature = "premium")]
 pub use crate::premium::tun;
@@ -15,6 +16,7 @@ use crate::proxy::inbound::mix::MixInbound;
 use crate::proxy::inbound::shadowquic::ShadowQuicInbound;
 use crate::proxy::inbound::socks5::Socks5Inbound;
 use crate::proxy::inbound::trojan::TrojanInbound;
+use crate::proxy::inbound::anytls::AnytlsInbound;
 use crate::proxy::observe::get_observer;
 use crate::utils::interface::InterfaceManager;
 use crate::utils::shutdown;
@@ -38,6 +40,7 @@ pub fn init_inbounds(cfg: &Config) -> anyhow::Result<()> {
             "http" => Arc::new(HttpInbound::new(name_clone, item)?),
             "mix" => Arc::new(MixInbound::new(name_clone, item)?),
             "trojan" => Arc::new(TrojanInbound::new(name_clone, item)?),
+            "anytls" => Arc::new(AnytlsInbound::new(name_clone, item)?),
             #[cfg(feature = "premium")]
             "tun" => Arc::new(TunInbound::new(name_clone, item)),
             #[cfg(not(feature = "premium"))]
