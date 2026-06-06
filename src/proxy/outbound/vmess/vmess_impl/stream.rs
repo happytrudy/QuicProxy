@@ -12,6 +12,7 @@ use futures::ready;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::proxy::TargetAddr;
+use crate::utils::new_io_other_error;
 
 use super::cipher::{AeadCipher, AeadCipherHelper, VmessSecurity};
 use super::header;
@@ -41,6 +42,7 @@ pub struct VmessStream<S> {
     is_udp: bool,
 
     read_state: ReadState,
+    read_pos: usize,
     read_buf: BytesMut,
 
     write_state: WriteState,
@@ -189,6 +191,7 @@ where
             is_udp,
 
             read_state: ReadState::AeadWaitingHeaderSize,
+            read_pos: 0,
             read_buf: BytesMut::new(),
 
             write_state: WriteState::BuildingData,
@@ -512,6 +515,7 @@ where
                         piece2.extend_from_slice(vec![0u8; cipher.security.overhead_len()].as_ref());
                     }
 
+                    let cur_len = piece2.len();
                     if let Some(ref mut cipher) = this.aead_write_cipher {
                         cipher.encrypt_inplace(&mut piece2)?;
                     }

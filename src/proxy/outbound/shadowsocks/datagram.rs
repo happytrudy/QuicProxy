@@ -3,7 +3,8 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures::{Sink, Stream, ready};
+use bytes::BytesMut;
+use futures::{Sink, SinkExt, Stream, StreamExt, ready};
 use shadowsocks::{
     ProxySocket,
     relay::udprelay::{
@@ -14,9 +15,10 @@ use tokio::io::ReadBuf;
 use tracing::debug;
 
 use crate::proxy::{
-    TargetAddr,
-    outbound::PacketInfo,
+    SourceAddr, TargetAddr,
+    outbound::{AnyPacket, PacketInfo},
 };
+use crate::utils::new_io_other_error;
 
 pub struct OutboundDatagramShadowsocks<S> {
     inner: ProxySocket<S>,
