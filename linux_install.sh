@@ -197,11 +197,11 @@ prompt_install_options() {
     echo ""
     echo -e "  ${GREEN}QuicProxy 支持两种入站协议:${NC}"
     echo ""
-    echo -e "  ${CYAN}1) anytls (TCP + JLS)${NC}  — 基于 TLS 的伪装隧道，兼容性好"
+    echo -e "  ${CYAN}1) anytls (TCP / insecure TLS)${NC}  — 基于 TLS 的伪装隧道，兼容性好"
     echo -e "  ${CYAN}2) shadowquic (QUIC + JLS)${NC} — 基于 QUIC 的伪装隧道，延迟更低"
     echo ""
 
-    echo -ne "  ${YELLOW}安装 anytls (TCP + JLS)? [Y/n]: ${NC}"
+    echo -ne "  ${YELLOW}安装 anytls (TCP / insecure TLS)? [Y/n]: ${NC}"
     read -r input
     if [[ -n "$input" ]]; then
       input=$(echo "$input" | tr '[:upper:]' '[:lower:]')
@@ -416,9 +416,7 @@ JSON5EOF
       "idle_timeout": ${idle_timeout},
       "tls": {
         "enable": true,
-        "enable_jls": true,
-        "jls_username": "${USERNAME}",
-        "jls_password": "${PASSWORD}",
+        "insecure": true,
         "sni": "${sni}"
       }
     }
@@ -536,7 +534,7 @@ generate_subscription_url() {
     node_num=$((node_num + 1))
     local anytls_encoded_tag
     anytls_encoded_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${anytls_tag}', safe=''))" 2>/dev/null || echo "${anytls_tag}")
-    anytls_url="anytls://${PASSWORD}@${host}:${port}?sni=${sni}&jls_username=${USERNAME}&jls_password=${PASSWORD}&insecure=false#${anytls_encoded_tag}"
+    anytls_url="anytls://${PASSWORD}@${host}:${port}?sni=${sni}&insecure=true#${anytls_encoded_tag}"
   fi
 
   # 将订阅写入文件，方便之后查看、systemd 日志也会引用这个路径
