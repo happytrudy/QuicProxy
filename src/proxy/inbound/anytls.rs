@@ -697,12 +697,11 @@ impl AnytlsInbound {
         })
     }
 
-    async fn listen_tcp(&self) -> Result<()> {
-        let listener = super::create_tcp_listener(self.address).await?;
-
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
-        let server_config = if let (Some(cert_path), Some(key_path)) = (&self.tls.cert, &self.tls.key) {
+    /// 构建 rustls 服务端配置（如启用 JLS 则注入 JLS 配置）。
+    fn build_server_config(&self) -> Result<rustls::ServerConfig> {
+        let mut server_config = if let (Some(cert_path), Some(key_path)) =
+            (&self.tls.cert, &self.tls.key)
+        {
             let certs = load_certs(cert_path)?;
             let key = load_keys(key_path)?;
             rustls::ServerConfig::builder()
@@ -724,6 +723,29 @@ impl AnytlsInbound {
                 .map_err(|e| new_io_other_error(format!("TLS config error: {}", e)))?
         };
 
+        // 启用 JLS（伪装传输层安全）
+        if self.tls.enable_jls {
+            let server_name = self.tls.sni.as_deref().unwrap_or("apple.com");
+            let jls_config = rustls::jls::JlsServerConfig::default()
+                .enable(true)
+                .add_user(self.tls.jls_password.clone(), self.tls.jls_username.clone())
+                .with_server_name(server_name.to_string());
+            server_config.jls_config = jls_config.into();
+            info!(
+                "Anytls inbound: JLS enabled, masquerading as server '{}'",
+                server_name
+            );
+        }
+
+        Ok(server_config)
+    }
+
+    async fn listen_tcp(&self) -> Result<()> {
+        let listener = super::create_tcp_listener(self.address).await?;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let server_config = self.build_server_config()?;
         let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
 
         info!("Anytls inbound listening on {}", self.address);
@@ -817,6 +839,7 @@ fn load_keys(path: &str) -> std::io::Result<rustls::pki_types::PrivateKeyDer<'st
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use tokio::net::{TcpListener, TcpStream};
 
     #[test]
     fn test_parse_target_ipv4() {
@@ -940,5 +963,199 @@ mod tests {
         let dbytes = daddr.to_bytes();
         let dparsed = parse_target_from_syn(&dbytes).expect("roundtrip domain");
         assert_eq!(dparsed, daddr);
+    }
+
+    /// 构造一个最小可用的 AnytlsInbound 实例（默认 TLS 配置，无 JLS）。
+    fn make_inbound_with_tls(tls: TlsConfig) -> AnytlsInbound {
+        let mut hasher = Sha256::new();
+        hasher.update(b"test-password");
+        let password_hash: [u8; 32] = hasher.finalize().into();
+        AnytlsInbound {
+            tag: "test".to_string(),
+            address: "127.0.0.1:0".parse().unwrap(),
+            password_hash,
+            idle_timeout: Duration::from_secs(60),
+            tls,
+        }
+    }
+
+    fn default_tls() -> TlsConfig {
+        TlsConfig {
+            enable: true,
+            insecure: false,
+            zero_rtt: false,
+            sni: None,
+            cert: None,
+            key: None,
+            alpns: None,
+            enable_jls: false,
+            jls_username: String::new(),
+            jls_password: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_build_server_config_without_jls() {
+        // 安装 rustls provider（多次调用幂等，忽略已安装错误）
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let inbound = make_inbound_with_tls(default_tls());
+        let cfg = inbound
+            .build_server_config()
+            .expect("build server config without JLS");
+
+        // 未启用 JLS 时，jls_config.enable 应为 false
+        assert!(!cfg.jls_config.enable, "JLS should be disabled by default");
+    }
+
+    #[test]
+    fn test_build_server_config_with_jls() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mut tls = default_tls();
+        tls.enable_jls = true;
+        tls.jls_username = "jls_user".to_string();
+        tls.jls_password = "jls_pass".to_string();
+        tls.sni = Some("www.example.com".to_string());
+
+        let inbound = make_inbound_with_tls(tls);
+        let cfg = inbound
+            .build_server_config()
+            .expect("build server config with JLS");
+
+        // 启用 JLS 后，jls_config.enable 应为 true
+        assert!(cfg.jls_config.enable, "JLS should be enabled");
+    }
+
+    #[test]
+    fn test_build_server_config_jls_default_sni() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // 未设置 SNI 时，JLS 应使用默认伪装域名（apple.com），仍能成功构建。
+        let mut tls = default_tls();
+        tls.enable_jls = true;
+        tls.jls_username = "jls_user".to_string();
+        tls.jls_password = "jls_pass".to_string();
+        tls.sni = None;
+
+        let inbound = make_inbound_with_tls(tls);
+        let cfg = inbound
+            .build_server_config()
+            .expect("build server config with JLS and default SNI");
+
+        assert!(cfg.jls_config.enable);
+    }
+
+    #[test]
+    fn test_anytls_inbound_jls_config_from_inbound_config() {
+        // 验证：JLS 字段能从 InboundConfig 正确传递到 AnytlsInbound 的 TlsConfig
+        let cfg: InboundConfig = serde_json::from_value(serde_json::json!({
+            "type": "anytls",
+            "address": "127.0.0.1",
+            "port": 0,
+            "password": "test-password",
+            "idle_timeout": 60,
+            "tls": {
+                "enable": true,
+                "sni": "www.example.com",
+                "enable_jls": true,
+                "jls_username": "alice",
+                "jls_password": "wonderland",
+            }
+        }))
+        .expect("parse inbound config");
+
+        let inbound = AnytlsInbound::new("test".to_string(), &cfg).expect("create inbound");
+        assert!(inbound.tls.enable_jls);
+        assert_eq!(inbound.tls.jls_username, "alice");
+        assert_eq!(inbound.tls.jls_password, "wonderland");
+        assert_eq!(inbound.tls.sni.as_deref(), Some("www.example.com"));
+    }
+
+    #[test]
+    fn test_anytls_inbound_jls_missing_credentials_rejected() {
+        // 验证：启用 JLS 但缺少 username/password 时应该被拒绝
+        let cfg: InboundConfig = serde_json::from_value(serde_json::json!({
+            "type": "anytls",
+            "address": "127.0.0.1",
+            "port": 0,
+            "password": "test-password",
+            "tls": {
+                "enable": true,
+                "enable_jls": true,
+                // 缺少 jls_username 和 jls_password
+            }
+        }))
+        .expect("parse inbound config");
+
+        let result = AnytlsInbound::new("test".to_string(), &cfg);
+        assert!(result.is_err(), "should reject JLS without credentials");
+    }
+
+    #[tokio::test]
+    async fn test_anytls_inbound_jls_handshake_compat() {
+        // 端到端：启用 JLS 的服务端 + 启用 JLS 的客户端，应可完成 TLS 握手
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let jls_user = "test_user".to_string();
+        let jls_pwd = "test_pass".to_string();
+
+        let mut server_tls = default_tls();
+        server_tls.enable_jls = true;
+        server_tls.jls_username = jls_user.clone();
+        server_tls.jls_password = jls_pwd.clone();
+        server_tls.sni = Some("localhost".to_string());
+
+        let inbound = make_inbound_with_tls(server_tls);
+        let server_config = inbound
+            .build_server_config()
+            .expect("build server config");
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        // 服务端：accept 一次 TLS 握手
+        let server_handle = tokio::spawn(async move {
+            let res = tokio::time::timeout(Duration::from_secs(5), async {
+                let (sock, _) = listener.accept().await?;
+                acceptor.accept(sock).await
+            })
+            .await;
+            res.is_ok() && res.unwrap().is_ok()
+        });
+
+        // 客户端：构造启用 JLS 的 ClientConfig
+        let mut client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        client_config.jls_config = rustls::jls::JlsClientConfig::new(&jls_pwd, &jls_user);
+
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+        let tcp = TcpStream::connect(addr).await.expect("connect tcp");
+        let server_name = rustls::pki_types::ServerName::try_from("localhost")
+            .expect("server name");
+
+        let client_handshake = tokio::time::timeout(
+            Duration::from_secs(5),
+            connector.connect(server_name, tcp),
+        )
+        .await;
+
+        // 客户端握手应成功
+        assert!(client_handshake.is_ok(), "client handshake should not timeout");
+        assert!(
+            client_handshake.unwrap().is_ok(),
+            "client handshake should succeed with matching JLS credentials"
+        );
+
+        // 服务端也应已成功 accept
+        let server_ok = tokio::time::timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server task complete")
+            .expect("server task join");
+        assert!(server_ok, "server-side TLS handshake should succeed");
     }
 }

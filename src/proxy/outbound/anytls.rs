@@ -28,7 +28,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::OutboundConfig,
     proxy::{
-        TlsConfig, SessionCloser, SourceAddr, TargetAddr,
+        SessionCloser, SourceAddr, TargetAddr, TlsConfig,
         anytls_proto::*,
         outbound::{AnyOutbound, AnyPacket, AnyStream, PacketInfo, select_outbound_interface},
     },
@@ -629,8 +629,16 @@ impl AnytlsClient {
     }
 
     fn build_tls_client_config(tls: &TlsConfig) -> Result<rustls::ClientConfig> {
-        let _ = rustls::crypto::ring::default_provider()
-            .install_default();
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        if tls.enable_jls {
+            let mut config = rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth();
+            config.jls_config =
+                rustls::jls::JlsClientConfig::new(&tls.jls_password, &tls.jls_username);
+            return Ok(config);
+        }
 
         if !tls.insecure {
             let mut root_store = rustls::RootCertStore::empty();
