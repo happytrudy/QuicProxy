@@ -329,6 +329,7 @@ pub struct OutboundConfig {
     pub idle_timeout: Option<u64>,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub uuid: Option<String>,
     pub udp_mod: Option<String>,
     pub congestion_controller: Option<String>,
 

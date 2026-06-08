@@ -1,17 +1,5 @@
 {
   "inbounds": {
-    "trojan_inbound": {
-      "type": "trojan",
-      "address": "0.0.0.0",
-      "port": 13441,
-      "password": "pwd",
-      "transport": {
-        "type": "tcp"
-      },
-      "tls": {
-        "enable": true
-      }
-    },
     "shadowquic_inbound": {
       "type": "shadowquic",
       "address": "0.0.0.0",
@@ -26,13 +14,38 @@
         "zero_rtt": true,
         "sni": "www.apple.com"
       }
+    },
+    "anytls_inbound": {
+      "type": "anytls",
+      "address": "0.0.0.0",
+      "port": 13431,
+      "password": "pwd",
+      "idle_timeout": 500,
+      "tls": {
+        "enable": true,
+        "insecure": true,
+        "sni": "www.apple.com"
+      }
+    },
+    "trojan_inbound": {
+      "type": "trojan",
+      "address": "0.0.0.0",
+      "port": 13441,
+      "password": "pwd",
+      "idle_timeout": 500,
+      "transport": {
+        "type": "tcp"
+      },
+      "tls": {
+        "enable": true
+      }
     }
   },
   "outbounds": {
     "default_server": "direct",
     "servers": {
       "direct": {
-        "type": "direct",
+        "type": "direct"
       }
     }
   },

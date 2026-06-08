@@ -42,7 +42,7 @@ impl VmessOutbound {
             .context(format!("vmess outbound '{}' requires port", tag))?;
         let server = TargetAddr::from_str2(&address, port)?;
 
-        let uuid = cfg.password.clone().context(format!(
+        let uuid = cfg.uuid.clone().context(format!(
             "vmess outbound '{}' requires password (uuid)",
             tag
         ))?;

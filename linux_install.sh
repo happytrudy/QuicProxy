@@ -192,24 +192,16 @@ prompt_install_options() {
 
   local choose_anytls="${INSTALL_ANYTLS:-yes}"
   local choose_shadowquic="${INSTALL_SHADOWQUIC:-yes}"
+  local choose_trojan="${INSTALL_TROJAN:-yes}"
 
   if [[ -t 0 ]]; then
     echo ""
-    echo -e "  ${GREEN}QuicProxy 支持两种入站协议:${NC}"
+    echo -e "  ${GREEN}QuicProxy 支持三种入站协议:${NC}"
     echo ""
-    echo -e "  ${CYAN}1) anytls (TCP / insecure TLS)${NC}  — 基于 TLS 的伪装隧道，兼容性好"
-    echo -e "  ${CYAN}2) shadowquic (QUIC + JLS)${NC} — 基于 QUIC 的伪装隧道，延迟更低"
+    echo -e "  ${CYAN}1) shadowquic (QUIC + JLS)${NC} — 基于 QUIC 的隧道，延迟更低"
+    echo -e "  ${CYAN}2) anytls (TCP / insecure TLS)${NC}  — 基于 TLS 的伪装隧道，抗封锁更好"
+    echo -e "  ${CYAN}3) trojan (TLS)${NC} — 标准 Trojan 协议，通用性更强"
     echo ""
-
-    echo -ne "  ${YELLOW}安装 anytls (TCP / insecure TLS)? [Y/n]: ${NC}"
-    read -r input
-    if [[ -n "$input" ]]; then
-      input=$(echo "$input" | tr '[:upper:]' '[:lower:]')
-      case "$input" in
-        n|no|0|false) choose_anytls="no" ;;
-        *)            choose_anytls="yes" ;;
-      esac
-    fi
 
     echo -ne "  ${YELLOW}安装 shadowquic (QUIC + JLS)? [Y/n]: ${NC}"
     read -r input
@@ -221,24 +213,43 @@ prompt_install_options() {
       esac
     fi
 
+    echo -ne "  ${YELLOW}安装 anytls (TCP / insecure TLS)? [Y/n]: ${NC}"
+    read -r input
+    if [[ -n "$input" ]]; then
+      input=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+      case "$input" in
+        n|no|0|false) choose_anytls="no" ;;
+        *)            choose_anytls="yes" ;;
+      esac
+    fi
+
+    echo -ne "  ${YELLOW}安装 trojan (TLS)? [Y/n]: ${NC}"
+    read -r input
+    if [[ -n "$input" ]]; then
+      input=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+      case "$input" in
+        n|no|0|false) choose_trojan="no" ;;
+        *)            choose_trojan="yes" ;;
+      esac
+    fi
+
     echo ""
   fi
 
-  if [[ "$choose_anytls" == "no" ]] && [[ "$choose_shadowquic" == "no" ]]; then
+  if [[ "$choose_anytls" == "no" ]] && [[ "$choose_shadowquic" == "no" ]] && [[ "$choose_trojan" == "no" ]]; then
     log_error "至少需要选择一种协议"
     exit 1
   fi
 
-  ENABLE_ANYTLS="$choose_anytls"
   ENABLE_SHADOWQUIC="$choose_shadowquic"
+  ENABLE_ANYTLS="$choose_anytls"
+  ENABLE_TROJAN="$choose_trojan"
 
-  if [[ "$choose_anytls" == "yes" ]] && [[ "$choose_shadowquic" == "yes" ]]; then
-    log_info "已选择: anytls + shadowquic (双协议)"
-  elif [[ "$choose_anytls" == "yes" ]]; then
-    log_info "已选择: anytls"
-  else
-    log_info "已选择: shadowquic"
-  fi
+  local parts=()
+  [[ "$choose_shadowquic" == "yes" ]] && parts+=("shadowquic")
+  [[ "$choose_anytls" == "yes" ]] && parts+=("anytls")
+  [[ "$choose_trojan" == "yes" ]] && parts+=("trojan")
+  log_info "已选择: ${parts[*]}"
 }
 
 detect_available_port() {
@@ -280,6 +291,9 @@ detect_available_port() {
       check_udp_port_free "$port" || ok=false
     fi
     if [[ "${ENABLE_ANYTLS:-}" == "yes" ]]; then
+      check_tcp_port_free "$port" || ok=false
+    fi
+    if [[ "${ENABLE_TROJAN:-}" == "yes" ]]; then
       check_tcp_port_free "$port" || ok=false
     fi
     [[ "$ok" == true ]]
@@ -367,18 +381,54 @@ detect_server_ip() {
   exit 1
 }
 
+detect_server_country() {
+  log_step "检测服务器国家..."
+
+  if [[ -n "${SERVER_COUNTRY:-}" ]]; then
+    log_info "使用手动指定的国家代码: ${SERVER_COUNTRY}"
+    return
+  fi
+
+  local country=""
+
+  # 优先用 ipinfo.io（有免费额度），备选 ip-api.com
+  country=$(curl -sf4 --connect-timeout 5 --max-time 10 "https://ipinfo.io/${SERVER_IP}/country" 2>/dev/null | tr -d '[:space:]' || true)
+  if [[ -z "$country" ]]; then
+    country=$(curl -sf4 --connect-timeout 5 --max-time 10 "http://ip-api.com/line/${SERVER_IP}?fields=countryCode" 2>/dev/null | tr -d '[:space:]' || true)
+  fi
+
+  if [[ -n "$country" ]] && [[ "$country" =~ ^[A-Z]{2}$ ]]; then
+    SERVER_COUNTRY="$country"
+    log_info "检测到服务器国家: ${SERVER_COUNTRY}"
+    return
+  fi
+
+  log_warn "无法自动检测国家代码, 使用 Unknown"
+  SERVER_COUNTRY="UN"
+}
+
 write_server_config() {
   log_step "生成服务端配置文件..."
 
   local sni="www.apple.com"
   local idle_timeout=500
 
-  local anytls_enabled=false
   local sq_enabled=false
-  [[ "${ENABLE_ANYTLS:-yes}" == "yes" ]] && anytls_enabled=true
+  local anytls_enabled=false
+  local trojan_enabled=false
   [[ "${ENABLE_SHADOWQUIC:-yes}" == "yes" ]] && sq_enabled=true
+  [[ "${ENABLE_ANYTLS:-yes}" == "yes" ]] && anytls_enabled=true
+  [[ "${ENABLE_TROJAN:-yes}" == "yes" ]] && trojan_enabled=true
 
   local port="${SHADOWQUIC_PORT}"
+
+  # 计算启用的协议列表，用于逗号控制
+  local enabled=()
+  $sq_enabled && enabled+=("sq")
+  $anytls_enabled && enabled+=("anytls")
+  $trojan_enabled && enabled+=("trojan")
+  local total=${#enabled[@]}
+  local count=0
 
   cat > "$CONFIG_PATH" << JSON5EOF
 {
@@ -386,8 +436,9 @@ write_server_config() {
 JSON5EOF
 
   if $sq_enabled; then
-    local trailing_comma=""
-    $anytls_enabled && trailing_comma=","
+    count=$((count + 1))
+    local trailing=""
+    [[ $count -lt $total ]] && trailing=","
     cat >> "$CONFIG_PATH" << JSON5EOF
     "shadowquic_inbound": {
       "type": "shadowquic",
@@ -402,11 +453,14 @@ JSON5EOF
         "zero_rtt": true,
         "sni": "${sni}"
       }
-    }${trailing_comma}
+    }${trailing}
 JSON5EOF
   fi
 
   if $anytls_enabled; then
+    count=$((count + 1))
+    local trailing=""
+    [[ $count -lt $total ]] && trailing=","
     cat >> "$CONFIG_PATH" << JSON5EOF
     "anytls_inbound": {
       "type": "anytls",
@@ -419,7 +473,28 @@ JSON5EOF
         "insecure": true,
         "sni": "${sni}"
       }
-    }
+    }${trailing}
+JSON5EOF
+  fi
+
+  if $trojan_enabled; then
+    count=$((count + 1))
+    local trailing=""
+    [[ $count -lt $total ]] && trailing=","
+    cat >> "$CONFIG_PATH" << JSON5EOF
+    "trojan_inbound": {
+      "type": "trojan",
+      "address": "0.0.0.0",
+      "port": ${port},
+      "password": "${PASSWORD}",
+      "idle_timeout": ${idle_timeout},
+      "transport": {
+        "type": "tcp"
+      },
+      "tls": {
+        "enable": true
+      }
+    }${trailing}
 JSON5EOF
   fi
 
@@ -507,20 +582,22 @@ generate_subscription_url() {
   local host="${SERVER_IP}"
   local port="${SHADOWQUIC_PORT}"
   local sni="www.apple.com"
-  local base_tag="$(hostname 2>/dev/null || echo 'Server')"
 
   local anytls_enabled=false
   local sq_enabled=false
+  local trojan_enabled=false
   [[ "${ENABLE_ANYTLS:-yes}" == "yes" ]] && anytls_enabled=true
   [[ "${ENABLE_SHADOWQUIC:-yes}" == "yes" ]] && sq_enabled=true
+  [[ "${ENABLE_TROJAN:-yes}" == "yes" ]] && trojan_enabled=true
 
   local node_num=1
   local sq_url=""
   local anytls_url=""
+  local trojan_url=""
 
   if $sq_enabled; then
     local sq_tag
-    sq_tag=$(printf "%02d-%s" "${node_num}" "${base_tag}")
+    sq_tag=$(printf "%s-%02d" "${SERVER_COUNTRY}" "${node_num}")
     node_num=$((node_num + 1))
     local encoded_tag
     encoded_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${sq_tag}', safe=''))" 2>/dev/null || echo "${sq_tag}")
@@ -529,11 +606,20 @@ generate_subscription_url() {
 
   if $anytls_enabled; then
     local anytls_tag
-    anytls_tag=$(printf "%02d-%s" "${node_num}" "${base_tag}")
+    anytls_tag=$(printf "%s-%02d" "${SERVER_COUNTRY}" "${node_num}")
     node_num=$((node_num + 1))
     local anytls_encoded_tag
     anytls_encoded_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${anytls_tag}', safe=''))" 2>/dev/null || echo "${anytls_tag}")
     anytls_url="anytls://${PASSWORD}@${host}:${port}?sni=${sni}&insecure=true#${anytls_encoded_tag}"
+  fi
+
+  if $trojan_enabled; then
+    local trojan_tag
+    trojan_tag=$(printf "%s-%02d" "${SERVER_COUNTRY}" "${node_num}")
+    node_num=$((node_num + 1))
+    local trojan_encoded_tag
+    trojan_encoded_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${trojan_tag}', safe=''))" 2>/dev/null || echo "${trojan_tag}")
+    trojan_url="trojan://${PASSWORD}@${host}:${port}?sni=${sni}&type=tcp#${trojan_encoded_tag}"
   fi
 
   # 将订阅写入文件，方便之后查看、systemd 日志也会引用这个路径
@@ -544,6 +630,9 @@ generate_subscription_url() {
     if $anytls_enabled; then
       echo "$anytls_url"
     fi
+    if $trojan_enabled; then
+      echo "$trojan_url"
+    fi
   } > "${INSTALL_DIR}/subscription.txt"
 
   # 简化输出：直接显示订阅链接
@@ -553,6 +642,9 @@ generate_subscription_url() {
   fi
   if $anytls_enabled; then
     echo "$anytls_url"
+  fi
+  if $trojan_enabled; then
+    echo "$trojan_url"
   fi
   echo ""
 
@@ -602,6 +694,7 @@ main() {
   generate_credentials
   detect_available_port
   detect_server_ip
+  detect_server_country
   write_server_config
   install_systemd_service
   generate_subscription_url
