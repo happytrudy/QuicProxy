@@ -514,7 +514,8 @@ JSON5EOF
         "type": "tcp"
       },
       "tls": {
-        "enable": true
+        "enable": true,
+        "insecure": true
       }
     }${trailing}
 JSON5EOF
@@ -640,7 +641,7 @@ generate_subscription_url() {
     node_num=$((node_num + 1))
     local trojan_encoded_tag
     trojan_encoded_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${trojan_tag}', safe=''))" 2>/dev/null || echo "${trojan_tag}")
-    trojan_url="trojan://${PASSWORD}@${host}:${TROJAN_PORT}?sni=${sni}&type=tcp#${trojan_encoded_tag}"
+    trojan_url="trojan://${PASSWORD}@${host}:${TROJAN_PORT}?sni=${sni}&type=tcp&insecure=true#${trojan_encoded_tag}"
   fi
 
   # 将订阅写入文件，方便之后查看、systemd 日志也会引用这个路径
