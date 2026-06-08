@@ -272,72 +272,107 @@ check_tcp_port_free() {
   return 0
 }
 
-port_is_ok() {
-  local port=$1
-  local ok=true
-  if [[ "${ENABLE_SHADOWQUIC:-}" == "yes" ]]; then
-    check_udp_port_free "$port" || ok=false
-  fi
-  if [[ "${ENABLE_ANYTLS:-}" == "yes" ]]; then
-    check_tcp_port_free "$port" || ok=false
-  fi
-  if [[ "${ENABLE_TROJAN:-}" == "yes" ]]; then
-    check_tcp_port_free "$port" || ok=false
-  fi
-  [[ "$ok" == true ]]
+find_free_tcp_port() {
+  # 在候选端口列表中找到首个空闲 TCP 端口，并避开已分配的端口
+  local exclude_a="${1:-}"
+  local exclude_b="${2:-}"
+  local candidates=(443 13431 8443 4443 54321)
+  for port in "${candidates[@]}"; do
+    [[ "$port" == "$exclude_a" ]] && continue
+    [[ "$port" == "$exclude_b" ]] && continue
+    if check_tcp_port_free "$port"; then
+      echo "$port"
+      return 0
+    fi
+  done
+  # 候选耗尽后，从基准端口向后偏移寻找
+  local base="${exclude_a:-443}"
+  for offset in 1 2 3 11 21 31 41 51 101 201; do
+    local candidate=$((base + offset))
+    [[ "$candidate" == "$exclude_a" ]] && continue
+    [[ "$candidate" == "$exclude_b" ]] && continue
+    if check_tcp_port_free "$candidate"; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_free_udp_port() {
+  local candidates=(443 13431 8443 4443 54321)
+  for port in "${candidates[@]}"; do
+    if check_udp_port_free "$port"; then
+      echo "$port"
+      return 0
+    fi
+  done
+  return 1
 }
 
 detect_available_port() {
   log_step "检测可用端口..."
 
-  local preferred=443
-  local fallback_ports=(13431 8443 4443 54321)
+  SQ_PORT=""
+  ANYTLS_PORT=""
+  TROJAN_PORT=""
 
   if [[ -n "${PORT:-}" ]]; then
-    SQ_PORT="$PORT"
-    ANYTLS_PORT="$PORT"
-    TROJAN_PORT="$PORT"
-    log_info "使用手动指定的端口: ${SQ_PORT}"
-  else
-    local found_port=""
-    if port_is_ok "$preferred"; then
-      found_port="$preferred"
-      log_info "端口 ${preferred} 可用, 优先使用"
-    else
-      log_warn "端口 ${preferred} 已被占用"
-      for port in "${fallback_ports[@]}"; do
-        if port_is_ok "$port"; then
-          found_port="$port"
-          log_info "使用备用端口: ${port}"
-          break
-        fi
-        log_warn "端口 ${port} 已被占用"
-      done
+    # 手动指定端口时，shadowquic 用 UDP，可与一个 TCP 协议共用；
+    # anytls / trojan 均为 TCP，若都启用则必须分配不同端口
+    if [[ "${ENABLE_SHADOWQUIC:-}" == "yes" ]]; then
+      SQ_PORT="$PORT"
+      log_info "shadowquic(UDP) → ${SQ_PORT} (手动指定)"
     fi
-
-    if [[ -z "$found_port" ]]; then
-      log_error "所有候选端口均被占用, 请手动指定: PORT=12345 sudo bash linux_install.sh"
-      exit 1
+    if [[ "${ENABLE_ANYTLS:-}" == "yes" ]]; then
+      ANYTLS_PORT="$PORT"
+      log_info "anytls(TCP) → ${ANYTLS_PORT} (手动指定)"
     fi
-
-    SQ_PORT="$found_port"
-    ANYTLS_PORT="$found_port"
-    TROJAN_PORT="$found_port"
-  fi
-
-  # anytls 和 trojan 都是 TCP，不能共用同一端口
-  if [[ "${ENABLE_ANYTLS:-}" == "yes" ]] && [[ "${ENABLE_TROJAN:-}" == "yes" ]]; then
-    for offset in 1 2 3 11 21 31 41 51; do
-      local candidate=$((SQ_PORT + offset))
-      if check_tcp_port_free "$candidate"; then
-        TROJAN_PORT="$candidate"
-        log_info "anytls(TCP) → ${ANYTLS_PORT}, trojan(TCP) → ${TROJAN_PORT}"
-        break
+    if [[ "${ENABLE_TROJAN:-}" == "yes" ]]; then
+      if [[ "${ENABLE_ANYTLS:-}" == "yes" ]]; then
+        # 必须为 trojan 另找一个 TCP 端口，避免与 anytls 冲突
+        local trojan_port
+        trojan_port=$(find_free_tcp_port "$ANYTLS_PORT") || {
+          log_error "无法为 trojan 找到空闲 TCP 端口 (anytls 已占用 ${ANYTLS_PORT})"
+          exit 1
+        }
+        TROJAN_PORT="$trojan_port"
+        log_info "trojan(TCP) → ${TROJAN_PORT} (anytls 与 trojan 不能共用 TCP 端口)"
+      else
+        TROJAN_PORT="$PORT"
+        log_info "trojan(TCP) → ${TROJAN_PORT} (手动指定)"
       fi
-    done
-    if [[ "$TROJAN_PORT" == "$ANYTLS_PORT" ]]; then
-      log_error "无法为 trojan 找到额外的可用 TCP 端口 (尝试了 ${SQ_PORT}+1~51)"
-      exit 1
+    fi
+  else
+    # 自动检测：UDP 与 TCP 互不冲突，但 anytls / trojan 必须各自占用不同 TCP 端口
+    if [[ "${ENABLE_SHADOWQUIC:-}" == "yes" ]]; then
+      local sq_port
+      sq_port=$(find_free_udp_port) || {
+        log_error "未找到空闲 UDP 端口, 请手动指定: PORT=12345 sudo bash linux_install.sh"
+        exit 1
+      }
+      SQ_PORT="$sq_port"
+      log_info "shadowquic(UDP) → ${SQ_PORT}"
+    fi
+
+    if [[ "${ENABLE_ANYTLS:-}" == "yes" ]]; then
+      local anytls_port
+      anytls_port=$(find_free_tcp_port) || {
+        log_error "未找到空闲 TCP 端口给 anytls, 请手动指定: PORT=12345 sudo bash linux_install.sh"
+        exit 1
+      }
+      ANYTLS_PORT="$anytls_port"
+      log_info "anytls(TCP) → ${ANYTLS_PORT}"
+    fi
+
+    if [[ "${ENABLE_TROJAN:-}" == "yes" ]]; then
+      local trojan_port
+      trojan_port=$(find_free_tcp_port "$ANYTLS_PORT") || {
+        log_error "未找到空闲 TCP 端口给 trojan, 请手动指定: PORT=12345 sudo bash linux_install.sh"
+        exit 1
+      }
+      TROJAN_PORT="$trojan_port"
+      log_info "trojan(TCP) → ${TROJAN_PORT}"
     fi
   fi
 }
