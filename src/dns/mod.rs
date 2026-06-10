@@ -297,15 +297,18 @@ pub trait AnyDNS: Send + Sync + 'static {
             _ => return Ok(Vec::new()),
         };
 
+        let cache_key = format!("{}:{}", outbound.tag(), cache_key);
+
         if let Some(cache) = self.cache() {
             if let Ok(Some((ips, remaining_ttl, source))) = cache.get(&cache_key) {
                 let remaining = Duration::from_secs(remaining_ttl.saturating_sub(now_timestamp()));
                 info!(
-                    "hit dns cache from {:?}({}) for {}({:?})",
+                    "hit dns cache from {:?}({}) for {}({:?}) [{}]",
                     source,
                     format_duration(remaining),
                     domain,
-                    ips
+                    ips,
+                    outbound.tag()
                 );
                 return Ok(ips);
             }
@@ -453,7 +456,9 @@ pub trait AnyDNS: Send + Sync + 'static {
         domain: &str,
         outbound: &Arc<dyn AnyOutbound>,
     ) -> Result<Vec<u8>> {
-        let response_bytes = self.exchange_query(domain, QTYPE::TYPE(TYPE::A), outbound).await?;
+        let response_bytes = self
+            .exchange_query(domain, QTYPE::TYPE(TYPE::A), outbound)
+            .await?;
         apply_ttl_to_response(&response_bytes, self.min_ttl(), self.max_ttl())
     }
 
@@ -589,22 +594,8 @@ impl AnyDNS for UdpDns {
     }
 
     async fn exchange(&self, packet_bytes: &[u8]) -> Result<Vec<u8>> {
-        let target = resolve_target(&self.address, self.dns_server()).await?;
-        let target = TargetAddr::Ip(target);
-        let socket = self.outbound.connect_packet(&target).await?;
-
-        let buf = bytes::Bytes::copy_from_slice(packet_bytes);
-
-        socket.send_to(buf, &SourceAddr::dummy(), &target).await?;
-
-        // Use timeout for DNS queries
-        let (_, _, payload) =
-            tokio::time::timeout(self.outbound.connect_timeout(), socket.recv_from())
-                .await
-                .map_err(|_| anyhow!("DNS query timed out"))??;
-        socket.closer().close();
-
-        Ok(payload.to_vec())
+        self.exchange_with_outbound(packet_bytes, self.default_outbound())
+            .await
     }
 
     async fn exchange_with_outbound(
@@ -620,10 +611,9 @@ impl AnyDNS for UdpDns {
 
         socket.send_to(buf, &SourceAddr::dummy(), &target).await?;
 
-        let (_, _, payload) =
-            tokio::time::timeout(outbound.connect_timeout(), socket.recv_from())
-                .await
-                .map_err(|_| anyhow!("DNS query timed out"))??;
+        let (_, _, payload) = tokio::time::timeout(outbound.connect_timeout(), socket.recv_from())
+            .await
+            .map_err(|_| anyhow!("DNS query timed out"))??;
         socket.closer().close();
 
         Ok(payload.to_vec())
@@ -713,27 +703,8 @@ impl AnyDNS for HttpsDns {
     }
 
     async fn exchange(&self, packet_bytes: &[u8]) -> Result<Vec<u8>> {
-        let mut headers = HeaderMap::new();
-        headers.insert("Content-Type", "application/dns-message".parse().unwrap());
-
-        let response = http_outbound::request_post_via_outbound(
-            self.outbound.clone(),
-            self.dns_server(),
-            &self.url,
-            self.outbound.connect_timeout(),
-            Some(&headers),
-            Bytes::copy_from_slice(packet_bytes),
-        )
-        .await?;
-
-        if !response.status.is_success() {
-            return Err(anyhow::anyhow!(
-                "DoH server returned error: {}",
-                response.status
-            ));
-        }
-
-        Ok(response.body.to_vec())
+        self.exchange_with_outbound(packet_bytes, self.default_outbound())
+            .await
     }
 
     async fn exchange_with_outbound(
@@ -1085,7 +1056,7 @@ impl AnyDNS for FakeIPDNS {
     }
 
     fn default_outbound(&self) -> Arc<dyn AnyOutbound> {
-        unimplemented!("FakeIPDNS does not have a default outbound; use lookup/exchange directly with an explicit outbound")
+        unimplemented!("FakeIPDNS don't need a outbound.")
     }
 
     fn min_ttl(&self) -> Option<Duration> {
