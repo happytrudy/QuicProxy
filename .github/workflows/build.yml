@@ -1,8 +1,14 @@
 name: build
 
 on:
-  push:
-    branches: ["**"]
+  schedule:
+    - cron: '0 18 * * 0,2,4,6'
+  workflow_dispatch:
+    inputs:
+      clean_cache:
+        description: 'Clear caches'
+        required: false
+        type: boolean
 
 permissions:
   contents: read
